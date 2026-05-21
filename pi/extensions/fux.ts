@@ -268,6 +268,26 @@ function oneLineSnippet(text: string, maxLength = 72): string {
 	return `${oneLine.slice(0, maxLength - 1)}…`;
 }
 
+function normalizePromptInput(prompt: string | undefined): string | undefined {
+	const trimmed = prompt?.trim();
+	if (!trimmed) return undefined;
+
+	const quotePairs = [
+		["\"", "\""],
+		["'", "'"],
+		["“", "”"],
+		["‘", "’"],
+	] as const;
+
+	for (const [open, close] of quotePairs) {
+		if (trimmed.length >= open.length + close.length && trimmed.startsWith(open) && trimmed.endsWith(close)) {
+			return trimmed.slice(open.length, trimmed.length - close.length);
+		}
+	}
+
+	return trimmed;
+}
+
 function buildForkLabel(existingLabel: string | undefined, childSessionFile: string, prompt?: string): string {
 	const promptSuffix = prompt ? `: ${oneLineSnippet(prompt)}` : "";
 	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}${promptSuffix}`;
@@ -674,7 +694,7 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: stri
 		return;
 	}
 
-	const childPrompt = prompt?.trim();
+	const childPrompt = normalizePromptInput(prompt);
 	const forkMetadata = {
 		kind: "fork" as const,
 		version: FUX_METADATA_VERSION,
