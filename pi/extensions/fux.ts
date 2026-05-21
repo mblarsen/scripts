@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Type } from "typebox";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { copyFile, readFile, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
@@ -297,6 +297,18 @@ function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): 
 	pi.appendEntry(FUX_CUSTOM_TYPE, metadata);
 }
 
+function shortSessionId(sessionFile: string): string {
+	const filename = basename(sessionFile).replace(/\.jsonl$/, "");
+	const suffix = filename.split("_").at(-1) ?? filename;
+	return suffix.length > 8 ? suffix.slice(0, 8) : suffix;
+}
+
+function oneLineSnippet(text: string, maxLength = 72): string {
+	const oneLine = text.replace(/\s+/g, " ").trim();
+	if (oneLine.length <= maxLength) return oneLine;
+	return `${oneLine.slice(0, maxLength - 1)}…`;
+}
+
 function normalizePromptInput(prompt: string | undefined): string | undefined {
 	const trimmed = prompt?.trim();
 	if (!trimmed) return undefined;
@@ -315,6 +327,19 @@ function normalizePromptInput(prompt: string | undefined): string | undefined {
 	}
 
 	return trimmed;
+}
+
+function buildForkLabel(existingLabel: string | undefined, childSessionFile: string, prompt?: string): string {
+	const promptSuffix = prompt ? `: ${oneLineSnippet(prompt)}` : "";
+	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}${promptSuffix}`;
+	if (!existingLabel) return forkLabel;
+	if (existingLabel.includes(forkLabel)) return existingLabel;
+	return `${existingLabel} · ${forkLabel}`;
+}
+
+function labelForkPoint(pi: ExtensionAPI, ctx: ExtensionCommandContext, entryId: string, childSessionFile: string, prompt?: string): void {
+	const label = buildForkLabel(ctx.sessionManager.getLabel(entryId), childSessionFile, prompt);
+	pi.setLabel(entryId, label);
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -817,6 +842,7 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 			forkedSessionFile: forkMetadata.forkedSessionFile,
 		},
 	});
+	labelForkPoint(pi, ctx, leafId, forkedSessionFile, childPrompt);
 
 	const command = buildForkPaneCommand(forkedSessionFile);
 	const paneId = await runTmuxSplit(command, ctx.cwd);
