@@ -37,6 +37,7 @@ You can suggest forking using the `ask_user` tool when it makes sense. If the us
 |------|-------------|
 | `fux_fork` | Fork session in a new tmux pane. Args: `prompt` (optional string) |
 | `fux_merge` | Merge fork back into parent. Args: `action` (`preview` or `execute`), `childSessionPath` (optional), `keep` (optional bool) |
+| `fux_delete` | Delete current fork and close its tmux pane without merging. Args: `yes` (must be true after explicit user confirmation) |
 
 ## Explain Before Forking
 
@@ -44,13 +45,13 @@ Before forking, tell the user the merge workflow in plain language:
 
 > This creates a /fux fork. To merge back, preview first, then execute the merge. After the merge, restart the parent using the command printed by fux.
 
-The extension writes role-specific visible reminders into both sessions and shows an above-editor fux widget:
+The extension writes role-specific visible reminders into both sessions and shows a short above-editor fux widget:
 
 - parent widget: says this pane is the parent and shows the restart command
-- child widget: says this pane is the child fork and names the parent as the merge target
-- `/fux hide` hides the widget for the current fork generation
+- child widget: says this pane is the child fork and shows the parent restart command; it does not describe the merge process
+- `/fux toggle` turns the widget on/off for the current branch
 
-## Merge Triggers
+## Merge or Discard
 
 When the user signals they are done with the fork, check whether they want to merge. Common triggers:
 
@@ -60,6 +61,8 @@ When the user signals they are done with the fork, check whether they want to me
 - "let's integrate this into the parent"
 
 If the user says something like this, call `fux_merge` with `action: "preview"`, ask if they want to proceed, then call `fux_merge` with `action: "execute"` if they say yes.
+
+If the user wants to discard the fork instead, warn that `/fux delete` deletes the fork session and closes the pane without merging. Use `fux_delete` only after explicit confirmation.
 
 ## After Merging
 
@@ -74,7 +77,9 @@ The user must restart the parent pi session with the exact command printed by fu
 /fux merge [--dry-run]        Show what would be merged
 /fux merge --yes              Merge fork back into parent (deletes fork)
 /fux merge --yes --keep       Merge but keep the fork
-/fux hide                     Hide the fux guidance widget
+/fux delete                   Warn, then delete this fork and close this pane
+/fux delete --yes             Delete this fork and close this pane without prompt
+/fux toggle                   Toggle the fux guidance widget
 ```
 
 ## /tree vs /fux

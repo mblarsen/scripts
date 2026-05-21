@@ -72,6 +72,10 @@ type MergeOptions = {
 	childSessionPath?: string;
 };
 
+type DeleteOptions = {
+	yes: boolean;
+};
+
 type MergePlan = {
 	parentSessionFile: string;
 	childSessionFile: string;
@@ -362,15 +366,13 @@ function wrapPlain(text: string, width: number): string[] {
 
 function renderFuxWidgetLines(state: FuxWidgetState, width: number): string[] {
 	const inner = Math.max(0, width - 4);
-	const lines = [widgetTop("Fux", state.role === "parent" ? "parent" : "child fork", width)];
+	const lines = [widgetTop("Fux", state.role === "parent" ? "parent" : "child", width)];
 	if (state.role === "parent") {
-		lines.push(widgetLine(" A fux child fork was started in another pane.", width));
-		lines.push(widgetLine(" When it merges back, restart this parent:", width));
+		lines.push(widgetLine(" Parent pane; child fork opened.", width));
+		lines.push(widgetLine(" After merge, restart:", width));
 	} else {
-		lines.push(widgetLine(" This pane is a fux child fork.", width));
-		lines.push(widgetLine(" Merge target: the parent session that created it.", width));
-		lines.push(widgetLine(" Merge: fux_merge preview → execute", width));
-		lines.push(widgetLine(" Then restart the parent:", width));
+		lines.push(widgetLine(" Child fork.", width));
+		lines.push(widgetLine(" Parent:", width));
 	}
 	for (const chunk of wrapPlain(parentRestartCommand(state.parentSessionFile), inner)) {
 		lines.push(widgetLine(` ${chunk}`, width));
@@ -384,12 +386,23 @@ function maybeFuxForkMetadata(entry: SessionEntry): (FuxForkMetadata & JsonObjec
 	return isFuxForkMetadata(data) ? data : undefined;
 }
 
-function findFuxWidgetState(ctx: ExtensionContext): FuxWidgetState | undefined {
+function fuxWidgetVisibility(entry: SessionEntry): boolean | undefined {
+	const data = fuxData(entry);
+	if (data?.kind === "widget_hidden") return false;
+	if (data?.kind === "widget_visibility" && typeof data.visible === "boolean") return data.visible;
+	return undefined;
+}
+
+function findFuxWidgetState(ctx: ExtensionContext, respectVisibility = true): FuxWidgetState | undefined {
 	const branch = ctx.sessionManager.getBranch();
-	const latestHideIndex = branch.findLastIndex((entry) => fuxData(entry)?.kind === "widget_hidden");
+	if (respectVisibility) {
+		const latestVisibilityIndex = branch.findLastIndex((entry) => fuxWidgetVisibility(entry) !== undefined);
+		if (latestVisibilityIndex >= 0 && fuxWidgetVisibility(branch[latestVisibilityIndex]) === false) {
+			return undefined;
+		}
+	}
 
 	for (let index = branch.length - 1; index >= 0; index--) {
-		if (index < latestHideIndex) break;
 		const metadata = maybeFuxForkMetadata(branch[index]);
 		if (metadata?.recordedIn === "child") {
 			return {
@@ -403,8 +416,6 @@ function findFuxWidgetState(ctx: ExtensionContext): FuxWidgetState | undefined {
 
 	const recentBranch = branch.slice(Math.max(0, branch.length - 5));
 	for (let index = recentBranch.length - 1; index >= 0; index--) {
-		const absoluteIndex = branch.length - recentBranch.length + index;
-		if (absoluteIndex < latestHideIndex) break;
 		const metadata = maybeFuxForkMetadata(recentBranch[index]);
 		if (metadata?.recordedIn === "parent") {
 			return {
@@ -419,13 +430,7 @@ function findFuxWidgetState(ctx: ExtensionContext): FuxWidgetState | undefined {
 	return undefined;
 }
 
-function updateFuxWidget(ctx: ExtensionContext): void {
-	if (!ctx.hasUI) return;
-	const state = findFuxWidgetState(ctx);
-	if (!state) {
-		ctx.ui.setWidget(FUX_WIDGET_KEY, undefined);
-		return;
-	}
+function setFuxWidget(ctx: ExtensionContext, state: FuxWidgetState): void {
 	ctx.ui.setWidget(
 		FUX_WIDGET_KEY,
 		() => ({
@@ -436,6 +441,44 @@ function updateFuxWidget(ctx: ExtensionContext): void {
 		}),
 		{ placement: "aboveEditor" },
 	);
+}
+
+function updateFuxWidget(ctx: ExtensionContext): void {
+	if (!ctx.hasUI) return;
+	const state = findFuxWidgetState(ctx);
+	if (!state) {
+		ctx.ui.setWidget(FUX_WIDGET_KEY, undefined);
+		return;
+	}
+	setFuxWidget(ctx, state);
+}
+
+function toggleFuxWidget(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+	const visibleState = findFuxWidgetState(ctx);
+	if (visibleState) {
+		pi.appendEntry(FUX_CUSTOM_TYPE, {
+			kind: "widget_visibility",
+			visible: false,
+			updatedAt: new Date().toISOString(),
+		});
+		ctx.ui.setWidget(FUX_WIDGET_KEY, undefined);
+		notify(ctx, "Fux widget off.", "info");
+		return;
+	}
+
+	const hiddenState = findFuxWidgetState(ctx, false);
+	if (!hiddenState) {
+		notify(ctx, "No fux widget to toggle in this branch.", "warning");
+		return;
+	}
+
+	pi.appendEntry(FUX_CUSTOM_TYPE, {
+		kind: "widget_visibility",
+		visible: true,
+		updatedAt: new Date().toISOString(),
+	});
+	setFuxWidget(ctx, hiddenState);
+	notify(ctx, "Fux widget on.", "info");
 }
 
 function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): void {
@@ -546,6 +589,21 @@ function parseMergeArgs(args: string): MergeOptions {
 			continue;
 		}
 		throw new Error(`Unexpected /fux merge argument: ${part}`);
+	}
+
+	return options;
+}
+
+function parseDeleteArgs(args: string): DeleteOptions {
+	const options: DeleteOptions = { yes: false };
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+
+	for (const part of parts) {
+		if (part === "--yes" || part === "-y") {
+			options.yes = true;
+			continue;
+		}
+		throw new Error(`Unexpected /fux delete argument: ${part}`);
 	}
 
 	return options;
@@ -898,6 +956,72 @@ async function cleanupForkAfterMerge(plan: MergePlan, ctx: ExtensionCommandConte
 	return `Fork session ${result}.`;
 }
 
+function isCurrentFuxChildSession(session: ParsedSession, sessionFile: string): boolean {
+	const parentSessionFile = session.header.parentSession;
+	if (!parentSessionFile) return false;
+	return session.sessionEntries.some((entry) => {
+		const data = fuxData(entry);
+		return isFuxForkMetadata(data) && samePath(data.parentSessionFile, parentSessionFile) && samePath(data.forkedSessionFile, sessionFile);
+	});
+}
+
+function deleteForkWarning(sessionFile: string, parentSessionFile: string): string {
+	return [
+		"This will delete this /fux fork and close this tmux pane.",
+		"Nothing will be merged into the parent.",
+		"",
+		`Fork: ${sessionFile}`,
+		`Parent: ${parentSessionFile}`,
+	].join("\n");
+}
+
+async function deleteCurrentFork(sessionFile: string, ctx: ExtensionCommandContext): Promise<string> {
+	const paneId = await getCurrentTmuxPaneId();
+	if (paneId) {
+		scheduleDeleteAndKillPane(sessionFile, paneId);
+		ctx.shutdown();
+		return "Fork session will be deleted and this pane will close.";
+	}
+
+	const result = await deleteSessionFile(sessionFile);
+	ctx.shutdown();
+	return `Fork session ${result}; agent will shut down.`;
+}
+
+async function doDeleteFux(args: string, ctx: ExtensionCommandContext): Promise<string> {
+	const options = parseDeleteArgs(args);
+	const currentSessionFile = ctx.sessionManager.getSessionFile();
+	if (!currentSessionFile) {
+		throw new Error("Cannot /fux delete an in-memory session.");
+	}
+
+	const sessionFile = canonicalPath(currentSessionFile);
+	const session = await readSession(sessionFile);
+	if (!isCurrentFuxChildSession(session, sessionFile)) {
+		throw new Error("Run /fux delete from a /fux child fork session. Refusing to delete this session.");
+	}
+
+	if (!options.yes) {
+		if (!ctx.hasUI) {
+			throw new Error("Deleting a fork requires --yes when no confirmation UI is available.");
+		}
+		const ok = await ctx.ui.confirm("Delete /fux fork?", deleteForkWarning(sessionFile, session.header.parentSession!));
+		if (!ok) return "Cancelled /fux delete.";
+	}
+
+	return deleteCurrentFork(sessionFile, ctx);
+}
+
+async function deleteFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
+	if (!ctx.isIdle()) {
+		notify(ctx, "Press Escape to stop the current turn, then run /fux delete again.", "warning");
+		return;
+	}
+
+	const message = await doDeleteFux(args, ctx);
+	notify(ctx, message, message.startsWith("Cancelled") ? "warning" : "info");
+}
+
 function mergeConfirmSummary(plan: MergePlan, options: Pick<MergeOptions, "deleteFork">): string {
 	return [
 		`Entries to merge: ${plan.entriesToAppend.length}`,
@@ -1143,10 +1267,36 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "fux_delete",
+		label: "Delete Fork",
+		description: "Delete this /fux child fork and close its tmux pane without merging. Only use when the user explicitly asks to delete/discard the fork.",
+		promptSnippet: "Delete current fork session",
+		parameters: Type.Object({
+			yes: Type.Optional(Type.Boolean({ description: "Must be true to confirm deleting this fork and closing this pane" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			try {
+				if (!params.yes) {
+					throw new Error("Deleting a fork is destructive. Re-run fux_delete with yes=true only after explicit user confirmation.");
+				}
+				const message = await doDeleteFux("--yes", ctx);
+				return {
+					content: [{ type: "text", text: message }],
+					details: { message },
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`fux_delete failed: ${message}`);
+			}
+		},
+	});
+
 	const FUX_SUBCOMMANDS: AutocompleteItem[] = [
 		{ value: "prompt", label: "prompt", description: "Fork session with an initial prompt" },
 		{ value: "merge", label: "merge", description: "Merge child fork into parent session" },
-		{ value: "hide", label: "hide", description: "Hide the fux guidance widget" },
+		{ value: "delete", label: "delete", description: "Delete this fork and close the tmux pane" },
+		{ value: "toggle", label: "toggle", description: "Toggle the fux guidance widget" },
 		{ value: "help", label: "help", description: "Show usage information" },
 	];
 
@@ -1157,8 +1307,12 @@ export default function (pi: ExtensionAPI) {
 		{ value: "--delete", label: "--delete", description: "Delete fork after merge (default)" },
 	];
 
+	const DELETE_FLAGS: AutocompleteItem[] = [
+		{ value: "--yes", label: "--yes", description: "Skip confirmation prompt" },
+	];
+
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Fork the current session with /fux prompt [text], or merge a child session with /fux merge [--dry-run] [--yes] [--keep].",
+		description: "Fork the current session with /fux prompt [text], merge a child session with /fux merge, or delete a child fork with /fux delete.",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
 			const trimmed = prefix.trim();
 
@@ -1173,10 +1327,11 @@ export default function (pi: ExtensionAPI) {
 			const subcommand = trimmed.slice(0, spaceIdx).toLowerCase();
 			const rest = trimmed.slice(spaceIdx + 1);
 
-			if (subcommand === "merge") {
+			if (subcommand === "merge" || subcommand === "delete") {
+				const flags = subcommand === "merge" ? MERGE_FLAGS : DELETE_FLAGS;
 				const tokens = rest.split(/\s+/).filter(Boolean);
 				const usedFlags = new Set(tokens.filter((p) => p.startsWith("--")));
-				const available = MERGE_FLAGS.filter((f) => !usedFlags.has(f.value));
+				const available = flags.filter((f) => !usedFlags.has(f.value));
 				const currentWord = tokens.at(-1) ?? "";
 
 				// Build the prefix that precedes the current word so completions
@@ -1186,8 +1341,8 @@ export default function (pi: ExtensionAPI) {
 					? tokens.slice(0, -1)
 					: tokens;
 				const prefixBase = preceding.length > 0
-					? `merge ${preceding.join(" ")} `
-					: "merge ";
+					? `${subcommand} ${preceding.join(" ")} `
+					: `${subcommand} `;
 
 				if (currentWord.startsWith("-")) {
 					const matching = available.filter((f) => f.value.startsWith(currentWord));
@@ -1227,15 +1382,18 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				if (parsed.subcommand === "hide") {
-					pi.appendEntry(FUX_CUSTOM_TYPE, { kind: "widget_hidden", hiddenAt: new Date().toISOString() });
-					ctx.ui.setWidget(FUX_WIDGET_KEY, undefined);
-					notify(ctx, "Hidden fux guidance widget for this fork.", "info");
+				if (parsed.subcommand === "delete") {
+					await deleteFux(parsed.rest, ctx);
+					return;
+				}
+
+				if (parsed.subcommand === "toggle") {
+					toggleFuxWidget(pi, ctx);
 					return;
 				}
 
 				if (parsed.subcommand === "help" || parsed.subcommand === "--help" || parsed.subcommand === "-h") {
-					notify(ctx, "Usage: /fux or /fux prompt [text] to fork; /fux merge [--dry-run] [--yes] [--keep|--delete] [child-session-path] to merge; /fux hide to hide guidance widget.", "info");
+					notify(ctx, "Usage: /fux or /fux prompt [text] to fork; /fux merge [--dry-run] [--yes] [--keep|--delete] [child-session-path] to merge; /fux delete [--yes] to delete this fork and close the pane; /fux toggle to show/hide guidance widget.", "info");
 					return;
 				}
 
