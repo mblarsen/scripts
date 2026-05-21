@@ -900,16 +900,36 @@ export default function (pi: ExtensionAPI) {
 			const rest = trimmed.slice(spaceIdx + 1);
 
 			if (subcommand === "merge") {
-				const usedFlags = new Set(rest.split(/\s+/).filter((p) => p.startsWith("--")));
+				const tokens = rest.split(/\s+/).filter(Boolean);
+				const usedFlags = new Set(tokens.filter((p) => p.startsWith("--")));
 				const available = MERGE_FLAGS.filter((f) => !usedFlags.has(f.value));
-				const currentWord = rest.split(/\s+/).at(-1) ?? "";
+				const currentWord = tokens.at(-1) ?? "";
+
+				// Build the prefix that precedes the current word so completions
+				// replace the full argument string rather than just the flag.
+				// e.g. typing "merge --y" should complete to "merge --yes", not "--yes".
+				const preceding = currentWord.startsWith("-")
+					? tokens.slice(0, -1)
+					: tokens;
+				const prefixBase = preceding.length > 0
+					? `merge ${preceding.join(" ")} `
+					: "merge ";
 
 				if (currentWord.startsWith("-")) {
 					const matching = available.filter((f) => f.value.startsWith(currentWord));
-					return matching.length > 0 ? matching : null;
+					if (matching.length === 0) return null;
+					return matching.map((f) => ({
+						value: `${prefixBase}${f.value}`,
+						label: f.label,
+						description: f.description,
+					}));
 				}
 
-				return available;
+				return available.map((f) => ({
+					value: `${prefixBase}${f.value}`,
+					label: f.label,
+					description: f.description,
+				}));
 			}
 
 			// prompt subcommand — free text, no completions
