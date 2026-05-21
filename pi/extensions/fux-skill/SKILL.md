@@ -34,13 +34,29 @@ Example prompts to the user:
 
 If the user agrees, run `/fux` or `/fux prompt [your intent]`.
 
+## After Merging
+
+When `/fux merge --yes` completes, the child session file is deleted and the fork pane closes. The parent session's JSON was edited externally.
+
+**You must restart the parent pi session** to see the merged content:
+
+```bash
+pi --resume <parent-session-path>
+# or
+pi /path/to/parent-session.jsonl
+```
+
+You can find the parent session path in the merge summary output, or use `/sessions` to browse available sessions.
+
+Don't leave the user hanging — tell them to restart before continuing work in the parent.
+
 ## CLI Usage
 
 ```
 /fux                          Fork, create new tmux pane
 /fux prompt [text]            Fork and start with initial prompt
 /fux merge [--dry-run]        Show what would be merged
-/fux merge --yes              Merge fork back into parent
+/fux merge --yes              Merge fork back into parent (deletes fork)
 /fux merge --yes --keep       Merge but keep the fork
 ```
 
