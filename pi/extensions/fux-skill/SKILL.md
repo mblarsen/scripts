@@ -45,7 +45,7 @@ Before forking, tell the user how merging works so they are not surprised:
 
 > This is a /fux fork. To merge back: use `fux_merge` with `action: "preview"` to see what's coming, then `fux_merge` with `action: "execute"` to merge. The fork session is deleted and this pane closes. Restart the parent pi session with `pi --resume <parent-path>`.
 
-The fork session itself contains a reminder entry with these instructions.
+The extension also writes a visible reminder entry into both the parent session and the fork session, but still explain it in chat before forking.
 
 ## Merge Triggers
 
@@ -72,7 +72,7 @@ pi /path/to/parent-session.jsonl
 
 You can find the parent session path in the merge summary output, or use `/sessions` to browse available sessions.
 
-Don't leave the user hanging — tell them to restart before continuing work in the parent.
+Don't leave the user hanging — tell them to restart before continuing work in the parent. The extension also writes a visible merge-completed reminder into the parent session so this instruction is present after resume.
 
 ## CLI Usage
 

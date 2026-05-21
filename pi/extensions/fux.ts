@@ -94,6 +94,7 @@ async function loadSessionManager(): Promise<{
 		open(path: string, sessionDir?: string): {
 			createBranchedSession(leafId: string): string | undefined;
 			appendCustomEntry(customType: string, data?: unknown): string;
+			appendCustomMessageEntry(customType: string, content: string, display: boolean, details?: unknown): string;
 		};
 	};
 }> {
@@ -263,6 +264,35 @@ function appendForkMetadata(
 	metadata: FuxForkMetadata,
 ): void {
 	sessionManager.appendCustomEntry(FUX_CUSTOM_TYPE, metadata);
+}
+
+function forkGuidanceMessage(parentSessionFile: string, forkedSessionFile: string): string {
+	return [
+		"/fux fork created.",
+		"",
+		"IMPORTANT merge workflow:",
+		"1. In the fork pane, preview with fux_merge action=preview or /fux merge --dry-run.",
+		"2. If the preview looks right, merge with fux_merge action=execute or /fux merge --yes.",
+		"3. After the merge, the parent session file has been edited externally.",
+		"4. You must manually restart/resume the parent pi session before continuing there.",
+		"",
+		`Parent session to restart: ${parentSessionFile}`,
+		`Fork session: ${forkedSessionFile}`,
+		"",
+		`Restart example: pi --resume ${parentSessionFile}`,
+	].join("\n");
+}
+
+function mergeRestartMessage(parentSessionFile: string, childSessionFile: string): string {
+	return [
+		"/fux merge completed.",
+		"",
+		"IMPORTANT: this parent session file was edited by a fork pane while the parent pi process may still have the old session in memory.",
+		"Manually restart/resume the parent pi session before continuing work here.",
+		"",
+		`Restart example: pi --resume ${parentSessionFile}`,
+		`Merged fork: ${childSessionFile}`,
+	].join("\n");
 }
 
 function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): void {
@@ -457,6 +487,9 @@ function isFuxForkMetadata(data: JsonObject | undefined): data is FuxForkMetadat
 }
 
 function isSkippableFuxEntry(entry: SessionEntry): boolean {
+	if ((entry.type === "custom" || entry.type === "custom_message") && (entry as JsonObject).customType === FUX_CUSTOM_TYPE) {
+		return true;
+	}
 	const data = fuxData(entry);
 	return data?.kind === "fork" || data?.kind === "merge";
 }
@@ -633,8 +666,8 @@ async function planFuxMerge(childSessionFile: string): Promise<MergePlan> {
 	const backupFile = `${parentSessionFile}.before-fux-merge-${timestamp}.bak`;
 
 	if (entriesToAppend.length > 0) {
-		appendPreserveLeafMarker(parentFileEntries, usedIds, parentOldLeafId, {
-			kind: "merge",
+		const mergeMetadata = {
+			kind: "merge" as const,
 			version: FUX_METADATA_VERSION,
 			childSessionFile: canonicalPath(childSessionFile),
 			forkedFromEntryId,
@@ -642,7 +675,20 @@ async function planFuxMerge(childSessionFile: string): Promise<MergePlan> {
 			mergedLeafId,
 			backupFile,
 			mergedAt: new Date().toISOString(),
-		});
+		};
+		const marker = appendPreserveLeafMarker(parentFileEntries, usedIds, parentOldLeafId, mergeMetadata);
+		const restartMessage: SessionEntry = {
+			type: "custom_message",
+			id: generateEntryId(usedIds),
+			parentId: marker?.id ?? parentOldLeafId,
+			timestamp: new Date().toISOString(),
+			customType: FUX_CUSTOM_TYPE,
+			content: mergeRestartMessage(parentSessionFile, canonicalPath(childSessionFile)),
+			display: true,
+			details: mergeMetadata,
+		};
+		parentFileEntries.push(restartMessage);
+		usedIds.add(restartMessage.id);
 	}
 
 	return {
@@ -783,8 +829,26 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
 
+	const guidance = forkGuidanceMessage(forkMetadata.parentSessionFile, forkMetadata.forkedSessionFile);
 	appendForkMetadata(sourceManager, { ...forkMetadata, recordedIn: "child" });
+	sourceManager.appendCustomMessageEntry(FUX_CUSTOM_TYPE, guidance, true, {
+		kind: "fork_guidance",
+		version: FUX_METADATA_VERSION,
+		parentSessionFile: forkMetadata.parentSessionFile,
+		forkedSessionFile: forkMetadata.forkedSessionFile,
+	});
 	appendParentForkMetadata(pi, { ...forkMetadata, recordedIn: "parent" });
+	pi.sendMessage({
+		customType: FUX_CUSTOM_TYPE,
+		content: guidance,
+		display: true,
+		details: {
+			kind: "fork_guidance",
+			version: FUX_METADATA_VERSION,
+			parentSessionFile: forkMetadata.parentSessionFile,
+			forkedSessionFile: forkMetadata.forkedSessionFile,
+		},
+	});
 	labelForkPoint(pi, ctx, leafId, forkedSessionFile, childPrompt);
 
 	const command = buildPiCommand(forkedSessionFile);
