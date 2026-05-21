@@ -331,7 +331,7 @@ function normalizePromptInput(prompt: string | undefined): string | undefined {
 
 function buildForkLabel(existingLabel: string | undefined, childSessionFile: string, prompt?: string): string {
 	const promptSuffix = prompt ? `: ${oneLineSnippet(prompt)}` : "";
-	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}${promptSuffix}`;
+	const forkLabel = `fux → ${shortSessionId(childSessionFile)}${promptSuffix}`;
 	if (!existingLabel) return forkLabel;
 	if (existingLabel.includes(forkLabel)) return existingLabel;
 	return `${existingLabel} · ${forkLabel}`;
