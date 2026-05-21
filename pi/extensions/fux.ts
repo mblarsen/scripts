@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { copyFile, readFile, writeFile } from "node:fs/promises";
+import { copyFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -57,6 +57,7 @@ type ParsedSession = {
 type MergeOptions = {
 	yes: boolean;
 	dryRun: boolean;
+	deleteFork: boolean;
 	childSessionPath?: string;
 };
 
@@ -238,6 +239,15 @@ async function runTmuxSplit(command: string, cwd: string): Promise<string> {
 	return paneId;
 }
 
+async function getCurrentTmuxPaneId(): Promise<string | undefined> {
+	if (!process.env.TMUX) return undefined;
+	try {
+		return await runTmux(["display-message", "-p", "#{pane_id}"], "tmux display-message");
+	} catch {
+		return undefined;
+	}
+}
+
 async function sendPromptToPane(paneId: string, prompt: string): Promise<void> {
 	// Give the new pane a brief moment to exec pi before sending terminal input.
 	await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
@@ -335,7 +345,7 @@ function resolveSessionPath(path: string, cwd: string): string {
 }
 
 function parseMergeArgs(args: string): MergeOptions {
-	const options: MergeOptions = { yes: false, dryRun: false };
+	const options: MergeOptions = { yes: false, dryRun: false, deleteFork: true };
 	const parts = args.trim().split(/\s+/).filter(Boolean);
 
 	for (const part of parts) {
@@ -345,6 +355,14 @@ function parseMergeArgs(args: string): MergeOptions {
 		}
 		if (part === "--dry-run" || part === "-n") {
 			options.dryRun = true;
+			continue;
+		}
+		if (part === "--delete") {
+			options.deleteFork = true;
+			continue;
+		}
+		if (part === "--keep" || part === "--no-delete") {
+			options.deleteFork = false;
 			continue;
 		}
 		if (!options.childSessionPath) {
@@ -651,7 +669,7 @@ async function writeFuxMerge(plan: MergePlan): Promise<void> {
 	await writeFile(plan.parentSessionFile, stringifySession(plan.parentFileEntries), "utf8");
 }
 
-function mergeSummary(plan: MergePlan): string {
+function mergeSummary(plan: MergePlan, options?: Pick<MergeOptions, "deleteFork">): string {
 	return [
 		`child: ${plan.childSessionFile}`,
 		`parent: ${plan.parentSessionFile}`,
@@ -659,8 +677,63 @@ function mergeSummary(plan: MergePlan): string {
 		`entries to merge: ${plan.entriesToAppend.length}`,
 		`already present: ${plan.duplicateCount}`,
 		`merged leaf: ${plan.mergedLeafId ?? "(none)"}`,
-		`backup: ${plan.backupFile}`,
+		`backup: ${plan.entriesToAppend.length > 0 ? plan.backupFile : "(not needed)"}`,
+		...(options ? [`after merge: ${options.deleteFork ? "delete fork and close child pane" : "keep fork"}`] : []),
 	].join("\n");
+}
+
+async function tryRun(command: string, args: string[]): Promise<boolean> {
+	return new Promise<boolean>((resolvePromise) => {
+		const child = spawn(command, args, { stdio: "ignore" });
+		child.once("error", () => resolvePromise(false));
+		child.once("exit", (code) => resolvePromise(code === 0));
+	});
+}
+
+async function deleteSessionFile(sessionFile: string): Promise<string> {
+	if (!existsSync(sessionFile)) return "already deleted";
+	if (await tryRun("trash", [sessionFile])) return "moved to Trash";
+	await unlink(sessionFile);
+	return "deleted";
+}
+
+function scheduleDeleteAndKillPane(sessionFile: string, paneId: string): void {
+	const script = [
+		"sleep 0.8",
+		"if command -v trash >/dev/null 2>&1; then trash \"$1\" 2>/dev/null || rm -f \"$1\"; else rm -f \"$1\"; fi",
+		"tmux kill-pane -t \"$2\" 2>/dev/null || true",
+	].join("; ");
+	const child = spawn("sh", ["-c", script, "fux-cleanup", sessionFile, paneId], {
+		detached: true,
+		stdio: "ignore",
+	});
+	child.unref();
+}
+
+async function cleanupForkAfterMerge(plan: MergePlan, ctx: ExtensionCommandContext): Promise<string | undefined> {
+	const currentSessionFile = ctx.sessionManager.getSessionFile();
+	const activeChild = currentSessionFile ? samePath(currentSessionFile, plan.childSessionFile) : false;
+
+	if (activeChild) {
+		const paneId = await getCurrentTmuxPaneId();
+		if (paneId) {
+			scheduleDeleteAndKillPane(plan.childSessionFile, paneId);
+			ctx.shutdown();
+			return "Fork session will be deleted and this pane will close.";
+		}
+
+		const result = await deleteSessionFile(plan.childSessionFile);
+		ctx.shutdown();
+		return `Fork session ${result}; agent will shut down.`;
+	}
+
+	const result = await deleteSessionFile(plan.childSessionFile);
+	return `Fork session ${result}.`;
+}
+
+async function confirmMergeAction(plan: MergePlan, options: MergeOptions, ctx: ExtensionCommandContext, title: string, lead: string): Promise<boolean> {
+	if (options.yes || !ctx.hasUI) return true;
+	return ctx.ui.confirm(title, `${lead}\n\n${mergeSummary(plan, options)}`);
 }
 
 async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: string): Promise<void> {
@@ -742,29 +815,49 @@ async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<voi
 		return;
 	}
 
-	if (plan.entriesToAppend.length === 0) {
-		notify(ctx, `Nothing new to merge.\n${mergeSummary(plan)}`, "info");
-		return;
-	}
-
 	if (options.dryRun) {
-		notify(ctx, `Dry run only; no files changed.\n${mergeSummary(plan)}`, "info");
+		notify(ctx, `Dry run only; no files changed.\n${mergeSummary(plan, options)}`, "info");
 		return;
 	}
 
-	if (!options.yes && ctx.hasUI) {
-		const ok = await ctx.ui.confirm(
-			"Merge /fux child session?",
-			`This writes the child branch into the parent session tree and creates a backup first. Make sure the parent pane/session is at rest.\n\n${mergeSummary(plan)}`,
+	if (plan.entriesToAppend.length === 0) {
+		if (!options.deleteFork) {
+			notify(ctx, `Nothing new to merge.\n${mergeSummary(plan, options)}`, "info");
+			return;
+		}
+
+		const ok = await confirmMergeAction(
+			plan,
+			options,
+			ctx,
+			"Delete /fux child session?",
+			"There are no new entries to merge. The child fork can be deleted.",
 		);
 		if (!ok) {
 			notify(ctx, "Cancelled /fux merge.", "warning");
 			return;
 		}
+
+		const cleanupMessage = await cleanupForkAfterMerge(plan, ctx);
+		notify(ctx, `Nothing new to merge. ${cleanupMessage ?? ""}\n${mergeSummary(plan, options)}`, "info");
+		return;
+	}
+
+	const ok = await confirmMergeAction(
+		plan,
+		options,
+		ctx,
+		"Merge /fux child session?",
+		"This writes the child branch into the parent session tree and creates a backup first. Make sure the parent pane/session is at rest.",
+	);
+	if (!ok) {
+		notify(ctx, "Cancelled /fux merge.", "warning");
+		return;
 	}
 
 	await writeFuxMerge(plan);
-	notify(ctx, `Merged /fux branch into parent session.\n${mergeSummary(plan)}`, "info");
+	const cleanupMessage = options.deleteFork ? await cleanupForkAfterMerge(plan, ctx) : undefined;
+	notify(ctx, `Merged /fux branch into parent session.${cleanupMessage ? ` ${cleanupMessage}` : ""}\n${mergeSummary(plan, options)}`, "info");
 }
 
 function splitSubcommand(args: string): { subcommand: string; rest: string } | undefined {
@@ -777,7 +870,7 @@ function splitSubcommand(args: string): { subcommand: string; rest: string } | u
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Fork the current session with /fux prompt [text], or merge a child session with /fux merge [--dry-run] [--yes].",
+		description: "Fork the current session with /fux prompt [text], or merge a child session with /fux merge [--dry-run] [--yes] [--keep].",
 		handler: async (args, ctx) => {
 			try {
 				const parsed = splitSubcommand(args);
@@ -797,7 +890,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				if (parsed.subcommand === "help" || parsed.subcommand === "--help" || parsed.subcommand === "-h") {
-					notify(ctx, "Usage: /fux or /fux prompt [text] to fork, or /fux merge [--dry-run] [--yes] [child-session-path] to merge a child session.", "info");
+					notify(ctx, "Usage: /fux or /fux prompt [text] to fork, or /fux merge [--dry-run] [--yes] [--keep|--delete] [child-session-path] to merge a child session. Merge deletes the fork and closes the child pane by default; use --keep to preserve it.", "info");
 					return;
 				}
 
