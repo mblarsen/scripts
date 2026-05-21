@@ -33,6 +33,7 @@ type FuxForkMetadata = {
 	forkedSessionFile: string;
 	forkedFromEntryId: string;
 	createdAt: string;
+	prompt?: string;
 	recordedIn?: "parent" | "child";
 };
 
@@ -202,26 +203,46 @@ function buildPiCommand(sessionFile: string): string {
 	return [shellQuote(argv0), ...args.map(shellQuote)].join(" ");
 }
 
-async function runTmuxSplit(command: string, cwd: string): Promise<void> {
+async function runTmux(args: string[], description: string): Promise<string> {
+	return new Promise<string>((resolvePromise, reject) => {
+		const child = spawn("tmux", args, {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+
+		child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+		child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+		child.once("error", reject);
+		child.once("exit", (code) => {
+			const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+			const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+			if (code === 0) {
+				resolvePromise(stdout.trim());
+				return;
+			}
+			reject(new Error(`${description} exited with code ${code ?? "unknown"}${stderr ? `: ${stderr}` : ""}`));
+		});
+	});
+}
+
+async function runTmuxSplit(command: string, cwd: string): Promise<string> {
 	if (!process.env.TMUX) {
 		throw new Error("Not running inside tmux; cannot create a tmux pane.");
 	}
 
-	await new Promise<void>((resolvePromise, reject) => {
-		const child = spawn("tmux", ["split-window", "-h", "-c", cwd, command], {
-			stdio: "ignore",
-			detached: true,
-		});
+	const paneId = await runTmux(["split-window", "-h", "-P", "-F", "#{pane_id}", "-c", cwd, command], "tmux split-window");
+	if (!paneId) {
+		throw new Error("tmux split-window did not return a pane id.");
+	}
+	return paneId;
+}
 
-		child.once("error", reject);
-		child.once("exit", (code) => {
-			if (code === 0) {
-				resolvePromise();
-				return;
-			}
-			reject(new Error(`tmux split-window exited with code ${code ?? "unknown"}`));
-		});
-	});
+async function sendPromptToPane(paneId: string, prompt: string): Promise<void> {
+	// Give the new pane a brief moment to exec pi before sending terminal input.
+	await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+	await runTmux(["send-keys", "-t", paneId, "-l", prompt], "tmux send-keys prompt");
+	await runTmux(["send-keys", "-t", paneId, "Enter"], "tmux send-keys enter");
 }
 
 function appendForkMetadata(
@@ -241,15 +262,22 @@ function shortSessionId(sessionFile: string): string {
 	return suffix.length > 8 ? suffix.slice(0, 8) : suffix;
 }
 
-function buildForkLabel(existingLabel: string | undefined, childSessionFile: string): string {
-	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}`;
+function oneLineSnippet(text: string, maxLength = 72): string {
+	const oneLine = text.replace(/\s+/g, " ").trim();
+	if (oneLine.length <= maxLength) return oneLine;
+	return `${oneLine.slice(0, maxLength - 1)}…`;
+}
+
+function buildForkLabel(existingLabel: string | undefined, childSessionFile: string, prompt?: string): string {
+	const promptSuffix = prompt ? `: ${oneLineSnippet(prompt)}` : "";
+	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}${promptSuffix}`;
 	if (!existingLabel) return forkLabel;
 	if (existingLabel.includes(forkLabel)) return existingLabel;
 	return `${existingLabel} · ${forkLabel}`;
 }
 
-function labelForkPoint(pi: ExtensionAPI, ctx: ExtensionCommandContext, entryId: string, childSessionFile: string): void {
-	const label = buildForkLabel(ctx.sessionManager.getLabel(entryId), childSessionFile);
+function labelForkPoint(pi: ExtensionAPI, ctx: ExtensionCommandContext, entryId: string, childSessionFile: string, prompt?: string): void {
+	const label = buildForkLabel(ctx.sessionManager.getLabel(entryId), childSessionFile, prompt);
 	pi.setLabel(entryId, label);
 }
 
@@ -615,7 +643,7 @@ function mergeSummary(plan: MergePlan): string {
 	].join("\n");
 }
 
-async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: string): Promise<void> {
 	if (!ctx.isIdle()) {
 		ctx.ui.notify("Press Escape to stop the current turn, then run /fux again.", "warning");
 		return;
@@ -646,6 +674,7 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void
 		return;
 	}
 
+	const childPrompt = prompt?.trim();
 	const forkMetadata = {
 		kind: "fork" as const,
 		version: FUX_METADATA_VERSION,
@@ -653,15 +682,19 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void
 		forkedSessionFile: canonicalPath(forkedSessionFile),
 		forkedFromEntryId: leafId,
 		createdAt: new Date().toISOString(),
+		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
 
 	appendForkMetadata(sourceManager, { ...forkMetadata, recordedIn: "child" });
 	appendParentForkMetadata(pi, { ...forkMetadata, recordedIn: "parent" });
-	labelForkPoint(pi, ctx, leafId, forkedSessionFile);
+	labelForkPoint(pi, ctx, leafId, forkedSessionFile, childPrompt);
 
 	const command = buildPiCommand(forkedSessionFile);
-	await runTmuxSplit(command, ctx.cwd);
-	ctx.ui.notify(`Fork opened in a new tmux pane: ${forkedSessionFile}`, "info");
+	const paneId = await runTmuxSplit(command, ctx.cwd);
+	if (childPrompt) {
+		await sendPromptToPane(paneId, childPrompt);
+	}
+	ctx.ui.notify(`Fork opened in a new tmux pane: ${forkedSessionFile}${childPrompt ? " and prompt sent" : ""}`, "info");
 }
 
 async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -724,12 +757,17 @@ function splitSubcommand(args: string): { subcommand: string; rest: string } | u
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Fork the current session, or merge a child session with /fux merge [--dry-run] [--yes].",
+		description: "Fork the current session with /fux prompt [text], or merge a child session with /fux merge [--dry-run] [--yes].",
 		handler: async (args, ctx) => {
 			try {
 				const parsed = splitSubcommand(args);
 				if (!parsed) {
 					await fux(ctx, pi);
+					return;
+				}
+
+				if (parsed.subcommand === "prompt") {
+					await fux(ctx, pi, parsed.rest);
 					return;
 				}
 
@@ -739,11 +777,11 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				if (parsed.subcommand === "help" || parsed.subcommand === "--help" || parsed.subcommand === "-h") {
-					notify(ctx, "Usage: /fux to fork, or /fux merge [--dry-run] [--yes] [child-session-path] to merge a child session.", "info");
+					notify(ctx, "Usage: /fux or /fux prompt [text] to fork, or /fux merge [--dry-run] [--yes] [child-session-path] to merge a child session.", "info");
 					return;
 				}
 
-				notify(ctx, `Unknown /fux subcommand: ${parsed.subcommand}. Usage: /fux [merge ...]`, "warning");
+				notify(ctx, `Unknown /fux subcommand: ${parsed.subcommand}. Usage: /fux [prompt [text]|merge ...]`, "warning");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				notify(ctx, `/fux failed: ${message}`, "error");
