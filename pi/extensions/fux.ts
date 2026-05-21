@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -233,6 +233,24 @@ function appendForkMetadata(
 
 function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): void {
 	pi.appendEntry(FUX_CUSTOM_TYPE, metadata);
+}
+
+function shortSessionId(sessionFile: string): string {
+	const filename = basename(sessionFile).replace(/\.jsonl$/, "");
+	const suffix = filename.split("_").at(-1) ?? filename;
+	return suffix.length > 8 ? suffix.slice(0, 8) : suffix;
+}
+
+function buildForkLabel(existingLabel: string | undefined, childSessionFile: string): string {
+	const forkLabel = `🍴 fux → ${shortSessionId(childSessionFile)}`;
+	if (!existingLabel) return forkLabel;
+	if (existingLabel.includes(forkLabel)) return existingLabel;
+	return `${existingLabel} · ${forkLabel}`;
+}
+
+function labelForkPoint(pi: ExtensionAPI, ctx: ExtensionCommandContext, entryId: string, childSessionFile: string): void {
+	const label = buildForkLabel(ctx.sessionManager.getLabel(entryId), childSessionFile);
+	pi.setLabel(entryId, label);
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -639,6 +657,7 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void
 
 	appendForkMetadata(sourceManager, { ...forkMetadata, recordedIn: "child" });
 	appendParentForkMetadata(pi, { ...forkMetadata, recordedIn: "parent" });
+	labelForkPoint(pi, ctx, leafId, forkedSessionFile);
 
 	const command = buildPiCommand(forkedSessionFile);
 	await runTmuxSplit(command, ctx.cwd);
