@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { copyFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -878,6 +879,56 @@ function splitSubcommand(args: string): { subcommand: string; rest: string } | u
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "fux_fork",
+		label: "Fork Session",
+		description: "Fork the current session into a new tmux pane with an optional initial prompt. Use when exploring a tangential topic, trying an approach, or following up on a side discussion without derailing the main session.",
+		promptSnippet: "Fork session for focused exploration",
+		parameters: Type.Object({
+			prompt: Type.Optional(Type.String({ description: "Initial prompt text to send to the forked session (no surrounding quotes needed)" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			try {
+				await fux(ctx, pi, params.prompt);
+				return {
+					content: [{ type: "text", text: "Fork created in a new tmux pane." }],
+					details: {},
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`fux_fork failed: ${message}`);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "fux_merge",
+		label: "Merge Fork",
+		description: "Merge this /fux fork back into the parent session. Preview shows what would be merged; execute performs the merge and deletes this fork (use --keep to preserve it).",
+		promptSnippet: "Merge fork into parent session",
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("preview"), Type.Literal("execute")], { description: "'preview' to show summary, 'execute' to merge and delete this fork" }),
+			childSessionPath: Type.Optional(Type.String({ description: "Path to child session (defaults to current session)" })),
+			keep: Type.Optional(Type.Boolean({ description: "If true, keep the fork session after merging (default: false, fork is deleted)" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			try {
+				let args = "";
+				if (params.action === "execute") args += "--yes ";
+				if (params.keep) args += "--keep ";
+				if (params.childSessionPath) args += params.childSessionPath;
+				await mergeFux(args.trim(), ctx);
+				return {
+					content: [{ type: "text", text: params.action === "preview" ? "Preview shown in notifications." : "Merge complete. Restart parent pi session to see results." }],
+					details: {},
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`fux_merge failed: ${message}`);
+			}
+		},
+	});
+
 	const FUX_SUBCOMMANDS: AutocompleteItem[] = [
 		{ value: "prompt", label: "prompt", description: "Fork session with an initial prompt" },
 		{ value: "merge", label: "merge", description: "Merge child fork into parent session" },
