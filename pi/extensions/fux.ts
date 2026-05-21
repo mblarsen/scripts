@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Type } from "typebox";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { copyFile, readFile, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
@@ -283,38 +283,14 @@ function parentRestartCommand(parentSessionFile: string): string {
 
 function forkGuidanceMessage(parentSessionFile: string): string {
 	return [
-		"/fux fork created.",
-		"",
-		"After merging this fork, restart the parent with:",
-		parentRestartCommand(parentSessionFile),
-		"",
-		"Merge from the fork: preview first, then execute.",
-	].join("\n");
-}
-
-function mergeRestartMessage(parentSessionFile: string): string {
-	return [
-		"/fux merge completed.",
-		"",
-		"Restart the parent session with:",
+		"A fork has been started in another pane.",
+		"When merging back, restart this instance using:",
 		parentRestartCommand(parentSessionFile),
 	].join("\n");
 }
 
 function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): void {
 	pi.appendEntry(FUX_CUSTOM_TYPE, metadata);
-}
-
-function shortSessionId(sessionFile: string): string {
-	const filename = basename(sessionFile).replace(/\.jsonl$/, "");
-	const suffix = filename.split("_").at(-1) ?? filename;
-	return suffix.length > 8 ? suffix.slice(0, 8) : suffix;
-}
-
-function oneLineSnippet(text: string, maxLength = 72): string {
-	const oneLine = text.replace(/\s+/g, " ").trim();
-	if (oneLine.length <= maxLength) return oneLine;
-	return `${oneLine.slice(0, maxLength - 1)}…`;
 }
 
 function normalizePromptInput(prompt: string | undefined): string | undefined {
@@ -335,19 +311,6 @@ function normalizePromptInput(prompt: string | undefined): string | undefined {
 	}
 
 	return trimmed;
-}
-
-function buildForkLabel(existingLabel: string | undefined, childSessionFile: string, prompt?: string): string {
-	const promptSuffix = prompt ? `: ${oneLineSnippet(prompt)}` : "";
-	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}${promptSuffix}`;
-	if (!existingLabel) return forkLabel;
-	if (existingLabel.includes(forkLabel)) return existingLabel;
-	return `${existingLabel} · ${forkLabel}`;
-}
-
-function labelForkPoint(pi: ExtensionAPI, ctx: ExtensionCommandContext, entryId: string, childSessionFile: string, prompt?: string): void {
-	const label = buildForkLabel(ctx.sessionManager.getLabel(entryId), childSessionFile, prompt);
-	pi.setLabel(entryId, label);
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -682,19 +645,7 @@ async function planFuxMerge(childSessionFile: string): Promise<MergePlan> {
 			backupFile,
 			mergedAt: new Date().toISOString(),
 		};
-		const marker = appendPreserveLeafMarker(parentFileEntries, usedIds, parentOldLeafId, mergeMetadata);
-		const restartMessage: SessionEntry = {
-			type: "custom_message",
-			id: generateEntryId(usedIds),
-			parentId: marker?.id ?? parentOldLeafId,
-			timestamp: new Date().toISOString(),
-			customType: FUX_CUSTOM_TYPE,
-			content: mergeRestartMessage(parentSessionFile),
-			display: true,
-			details: mergeMetadata,
-		};
-		parentFileEntries.push(restartMessage);
-		usedIds.add(restartMessage.id);
+		appendPreserveLeafMarker(parentFileEntries, usedIds, parentOldLeafId, mergeMetadata);
 	}
 
 	return {
@@ -722,19 +673,6 @@ async function writeFuxMerge(plan: MergePlan): Promise<void> {
 
 	await copyFile(plan.parentSessionFile, plan.backupFile);
 	await writeFile(plan.parentSessionFile, stringifySession(plan.parentFileEntries), "utf8");
-}
-
-function mergeSummary(plan: MergePlan, options?: Pick<MergeOptions, "deleteFork">): string {
-	return [
-		`child: ${plan.childSessionFile}`,
-		`parent: ${plan.parentSessionFile}`,
-		`fork source: ${plan.forkedFromEntryId}`,
-		`entries to merge: ${plan.entriesToAppend.length}`,
-		`already present: ${plan.duplicateCount}`,
-		`merged leaf: ${plan.mergedLeafId ?? "(none)"}`,
-		`backup: ${plan.entriesToAppend.length > 0 ? plan.backupFile : "(not needed)"}`,
-		...(options ? [`after merge: ${options.deleteFork ? "delete fork and close child pane" : "keep fork"}`] : []),
-	].join("\n");
 }
 
 async function tryRun(command: string, args: string[]): Promise<boolean> {
@@ -875,7 +813,6 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 			forkedSessionFile: forkMetadata.forkedSessionFile,
 		},
 	});
-	labelForkPoint(pi, ctx, leafId, forkedSessionFile, childPrompt);
 
 	const command = buildForkPaneCommand(forkedSessionFile);
 	const paneId = await runTmuxSplit(command, ctx.cwd);
@@ -912,12 +849,12 @@ async function doMergeFux(args: string, ctx: ExtensionCommandContext): Promise<s
 	}
 
 	if (options.dryRun) {
-		return `Dry run only; no files changed.\n${mergeSummary(plan, options)}`;
+		return `Dry run only; no files changed.\n${mergeConfirmSummary(plan, options)}`;
 	}
 
 	if (plan.entriesToAppend.length === 0) {
 		if (!options.deleteFork) {
-			return `Nothing new to merge.\n${mergeSummary(plan, options)}`;
+			return `Nothing new to merge.\n${mergeConfirmSummary(plan, options)}`;
 		}
 
 		const ok = await confirmMergeAction(
@@ -932,7 +869,7 @@ async function doMergeFux(args: string, ctx: ExtensionCommandContext): Promise<s
 		}
 
 		const cleanupMessage = await cleanupForkAfterMerge(plan, ctx);
-		return `Nothing new to merge. ${cleanupMessage ?? ""}\n${mergeSummary(plan, options)}`;
+		return `Nothing new to merge. ${cleanupMessage ?? ""}`;
 	}
 
 	const ok = await confirmMergeAction(
