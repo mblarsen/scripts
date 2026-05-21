@@ -242,7 +242,7 @@ function shortSessionId(sessionFile: string): string {
 }
 
 function buildForkLabel(existingLabel: string | undefined, childSessionFile: string): string {
-	const forkLabel = `🍴 fux → ${shortSessionId(childSessionFile)}`;
+	const forkLabel = ` fux → ${shortSessionId(childSessionFile)}`;
 	if (!existingLabel) return forkLabel;
 	if (existingLabel.includes(forkLabel)) return existingLabel;
 	return `${existingLabel} · ${forkLabel}`;
