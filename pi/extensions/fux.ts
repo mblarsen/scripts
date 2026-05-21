@@ -804,40 +804,30 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: stri
 	await doFux(pi, ctx, prompt);
 }
 
-async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
-	if (!ctx.isIdle()) {
-		notify(ctx, "Press Escape to stop the current turn, then run /fux merge again.", "warning");
-		return;
-	}
-
+async function doMergeFux(args: string, ctx: ExtensionCommandContext): Promise<string> {
 	const options = parseMergeArgs(args);
 	const currentSessionFile = ctx.sessionManager.getSessionFile();
 	if (!currentSessionFile && !options.childSessionPath) {
-		notify(ctx, "Cannot /fux merge an in-memory session without an explicit child session path.", "warning");
-		return;
+		throw new Error("Cannot /fux merge an in-memory session without an explicit child session path.");
 	}
 
 	const childSessionFile = options.childSessionPath ? resolveSessionPath(options.childSessionPath, ctx.cwd) : currentSessionFile!;
 	if (!existsSync(childSessionFile)) {
-		notify(ctx, `Child session file does not exist: ${childSessionFile}`, "error");
-		return;
+		throw new Error(`Child session file does not exist: ${childSessionFile}`);
 	}
 
 	const plan = await planFuxMerge(childSessionFile);
 	if (currentSessionFile && samePath(currentSessionFile, plan.parentSessionFile)) {
-		notify(ctx, "Run /fux merge from the child session, not from the parent session. Updating the active parent session file behind pi's back is unsafe.", "warning");
-		return;
+		throw new Error("Run /fux merge from the child session, not from the parent session. Updating the active parent session file behind pi's back is unsafe.");
 	}
 
 	if (options.dryRun) {
-		notify(ctx, `Dry run only; no files changed.\n${mergeSummary(plan, options)}`, "info");
-		return;
+		return `Dry run only; no files changed.\n${mergeSummary(plan, options)}`;
 	}
 
 	if (plan.entriesToAppend.length === 0) {
 		if (!options.deleteFork) {
-			notify(ctx, `Nothing new to merge.\n${mergeSummary(plan, options)}`, "info");
-			return;
+			return `Nothing new to merge.\n${mergeSummary(plan, options)}`;
 		}
 
 		const ok = await confirmMergeAction(
@@ -848,13 +838,11 @@ async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<voi
 			"There are no new entries to merge. The child fork can be deleted.",
 		);
 		if (!ok) {
-			notify(ctx, "Cancelled /fux merge.", "warning");
-			return;
+			return "Cancelled /fux merge.";
 		}
 
 		const cleanupMessage = await cleanupForkAfterMerge(plan, ctx);
-		notify(ctx, `Nothing new to merge. ${cleanupMessage ?? ""}\n${mergeSummary(plan, options)}`, "info");
-		return;
+		return `Nothing new to merge. ${cleanupMessage ?? ""}\n${mergeSummary(plan, options)}`;
 	}
 
 	const ok = await confirmMergeAction(
@@ -865,13 +853,22 @@ async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<voi
 		"This writes the child branch into the parent session tree and creates a backup first. Make sure the parent pane/session is at rest.",
 	);
 	if (!ok) {
-		notify(ctx, "Cancelled /fux merge.", "warning");
-		return;
+		return "Cancelled /fux merge.";
 	}
 
 	await writeFuxMerge(plan);
 	const cleanupMessage = options.deleteFork ? await cleanupForkAfterMerge(plan, ctx) : undefined;
-	notify(ctx, `Merged /fux branch into parent session.${cleanupMessage ? ` ${cleanupMessage}` : ""}\n${mergeSummary(plan, options)}`, "info");
+	return `Merged /fux branch into parent session.${cleanupMessage ? ` ${cleanupMessage}` : ""}\n${mergeSummary(plan, options)}`;
+}
+
+async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
+	if (!ctx.isIdle()) {
+		notify(ctx, "Press Escape to stop the current turn, then run /fux merge again.", "warning");
+		return;
+	}
+
+	const message = await doMergeFux(args, ctx);
+	notify(ctx, message, message.startsWith("Cancelled") ? "warning" : "info");
 }
 
 function splitSubcommand(args: string): { subcommand: string; rest: string } | undefined {
@@ -917,14 +914,13 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			try {
-				let args = "";
-				if (params.action === "execute") args += "--yes ";
+				let args = params.action === "preview" ? "--dry-run " : "--yes ";
 				if (params.keep) args += "--keep ";
 				if (params.childSessionPath) args += params.childSessionPath;
-				await mergeFux(args.trim(), ctx);
+				const message = await doMergeFux(args.trim(), ctx);
 				return {
-					content: [{ type: "text", text: params.action === "preview" ? "Preview shown in notifications." : "Merge complete. Restart parent pi session to see results." }],
-					details: {},
+					content: [{ type: "text", text: message }],
+					details: { message },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
