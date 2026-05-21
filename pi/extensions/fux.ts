@@ -797,9 +797,7 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 
 async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: string): Promise<void> {
 	if (!ctx.isIdle()) {
-		const fuxCmd = prompt ? `/fux prompt ${prompt}` : "/fux";
-		pi.sendUserMessage(fuxCmd, { deliverAs: "nextTurn" });
-		ctx.ui.notify(`Queued /fux for when this turn finishes. Fork will open in a new tmux pane.`, "info");
+		ctx.ui.notify("Press Escape to stop the current turn, then run /fux again.", "warning");
 		return;
 	}
 
@@ -895,7 +893,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			try {
-				await fux(ctx, pi, params.prompt);
+				await doFux(pi, ctx, params.prompt);
 				return {
 					content: [{ type: "text", text: "Fork created in a new tmux pane." }],
 					details: {},
