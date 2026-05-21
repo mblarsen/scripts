@@ -28,24 +28,26 @@ You can suggest forking using the `ask_user` tool when it makes sense, for examp
 - The user has a follow-up question on a related but separate topic
 - You want to explore a "what if" scenario before applying it
 
-Example prompts to the user:
+Example prompts:
 - "Want to fork off and explore this in more detail?"
 - "Should we split off to discuss this separately?"
 
-You can call these as slash commands or as tools:
+Use `fux_fork` when the user agrees.
+
+## Tools
 
 | Tool | Description |
 |------|-------------|
-| `fux_fork` | Fork session in new tmux pane. Args: `prompt` (optional string) |
-| `fux_merge` | Merge fork back into parent. Args: `action` ("preview"\|"execute"), `childSessionPath` (optional), `keep` (optional bool) |
+| `fux_fork` | Fork session in a new tmux pane. Args: `prompt` (optional string) |
+| `fux_merge` | Merge fork back into parent. Args: `action` (`preview` or `execute`), `childSessionPath` (optional), `keep` (optional bool) |
 
 ## Explain Before Forking
 
-Before forking, tell the user how merging works so they are not surprised:
+Before forking, tell the user the merge workflow in plain language:
 
-> This is a /fux fork. To merge back: use `fux_merge` with `action: "preview"` to see what's coming, then `fux_merge` with `action: "execute"` to merge. The fork session is deleted and this pane closes. Restart the parent pi session with `pi --resume <parent-path>`.
+> This creates a /fux fork. To merge back, preview first, then execute the merge. After the merge, restart the parent using the command printed by fux.
 
-The extension also writes a visible reminder entry into both the parent session and the fork session, but still explain it in chat before forking.
+The extension writes a visible reminder into both the parent session and the fork session.
 
 ## Merge Triggers
 
@@ -56,28 +58,19 @@ When the user signals they are done with the fork, check whether they want to me
 - "let's go back to the main session"
 - "let's integrate this into the parent"
 
-If the user says something like this, call `fux_merge` with `action: "preview"` to show the summary, ask if they want to proceed, then call `fux_merge` with `action: "execute"` if they say yes.
+If the user says something like this, call `fux_merge` with `action: "preview"`, ask if they want to proceed, then call `fux_merge` with `action: "execute"` if they say yes.
 
 ## After Merging
 
-When `fux_merge` with `action: "execute"` completes, the child session file is deleted and the fork pane closes. The parent session's JSON was edited externally.
+After `fux_merge` with `action: "execute"`, the parent session file was edited externally.
 
-**You must restart the parent pi session** to see the merged content:
+**The user must restart the parent pi session with the exact command printed by fux.**
 
-```bash
-pi --resume <parent-session-path>
-# or
-pi /path/to/parent-session.jsonl
-```
-
-You can find the parent session path in the merge summary output, or use `/sessions` to browse available sessions.
-
-Don't leave the user hanging — tell them to restart before continuing work in the parent. The extension also writes a visible merge-completed reminder into the parent session so this instruction is present after resume.
+Do not continue as if the parent automatically reloaded.
 
 ## CLI Usage
 
 ```
-/fux                          Fork, create new tmux pane
 /fux prompt [text]            Fork and start with initial prompt
 /fux merge [--dry-run]        Show what would be merged
 /fux merge --yes              Merge fork back into parent (deletes fork)
@@ -86,13 +79,4 @@ Don't leave the user hanging — tell them to restart before continuing work in 
 
 ## /tree vs /fux
 
-Both create branches, but with different intents:
-
-| | `/tree` | `/fux` |
-|---|---|---|
-| Use when | Exploring past decision points, resuming an earlier branch | Diving into a new topic or tangent |
-| Stays in | Current pane | New tmux pane |
-| Merge back | Via tree navigation | Via `/fux merge` |
-| Typical scope | Minor detours within the same task | Significant exploration or side discussions |
-
-Often it's better to stay on the session and use `/tree` to go back to a summary point later. Use `/fux` when the exploration is large enough to warrant full separation.
+Often it's better to stay in the session and use `/tree` to go back to a summary point later. Use `/fux` only when the exploration is large enough to warrant full separation.

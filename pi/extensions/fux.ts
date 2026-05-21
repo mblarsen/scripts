@@ -266,32 +266,27 @@ function appendForkMetadata(
 	sessionManager.appendCustomEntry(FUX_CUSTOM_TYPE, metadata);
 }
 
-function forkGuidanceMessage(parentSessionFile: string, forkedSessionFile: string): string {
+function parentRestartCommand(parentSessionFile: string): string {
+	return `pi --resume ${parentSessionFile}`;
+}
+
+function forkGuidanceMessage(parentSessionFile: string): string {
 	return [
 		"/fux fork created.",
 		"",
-		"IMPORTANT merge workflow:",
-		"1. In the fork pane, preview with fux_merge action=preview or /fux merge --dry-run.",
-		"2. If the preview looks right, merge with fux_merge action=execute or /fux merge --yes.",
-		"3. After the merge, the parent session file has been edited externally.",
-		"4. You must manually restart/resume the parent pi session before continuing there.",
+		"After merging this fork, restart the parent with:",
+		parentRestartCommand(parentSessionFile),
 		"",
-		`Parent session to restart: ${parentSessionFile}`,
-		`Fork session: ${forkedSessionFile}`,
-		"",
-		`Restart example: pi --resume ${parentSessionFile}`,
+		"Merge from the fork: preview first, then execute.",
 	].join("\n");
 }
 
-function mergeRestartMessage(parentSessionFile: string, childSessionFile: string): string {
+function mergeRestartMessage(parentSessionFile: string): string {
 	return [
 		"/fux merge completed.",
 		"",
-		"IMPORTANT: this parent session file was edited by a fork pane while the parent pi process may still have the old session in memory.",
-		"Manually restart/resume the parent pi session before continuing work here.",
-		"",
-		`Restart example: pi --resume ${parentSessionFile}`,
-		`Merged fork: ${childSessionFile}`,
+		"Restart the parent session with:",
+		parentRestartCommand(parentSessionFile),
 	].join("\n");
 }
 
@@ -683,7 +678,7 @@ async function planFuxMerge(childSessionFile: string): Promise<MergePlan> {
 			parentId: marker?.id ?? parentOldLeafId,
 			timestamp: new Date().toISOString(),
 			customType: FUX_CUSTOM_TYPE,
-			content: mergeRestartMessage(parentSessionFile, canonicalPath(childSessionFile)),
+			content: mergeRestartMessage(parentSessionFile),
 			display: true,
 			details: mergeMetadata,
 		};
@@ -780,9 +775,29 @@ async function cleanupForkAfterMerge(plan: MergePlan, ctx: ExtensionCommandConte
 	return `Fork session ${result}.`;
 }
 
+function mergeConfirmSummary(plan: MergePlan, options: Pick<MergeOptions, "deleteFork">): string {
+	return [
+		`Entries to merge: ${plan.entriesToAppend.length}`,
+		`Already present: ${plan.duplicateCount}`,
+		`After merge: ${options.deleteFork ? "delete fork and close this pane" : "keep fork"}`,
+		"",
+		"After merging, restart the parent with:",
+		parentRestartCommand(plan.parentSessionFile),
+	].join("\n");
+}
+
+function mergeCompleteMessage(plan: MergePlan, cleanupMessage?: string): string {
+	return [
+		`Merged /fux fork into parent.${cleanupMessage ? ` ${cleanupMessage}` : ""}`,
+		"",
+		"Restart the parent session with:",
+		parentRestartCommand(plan.parentSessionFile),
+	].join("\n");
+}
+
 async function confirmMergeAction(plan: MergePlan, options: MergeOptions, ctx: ExtensionCommandContext, title: string, lead: string): Promise<boolean> {
 	if (options.yes || !ctx.hasUI) return true;
-	return ctx.ui.confirm(title, `${lead}\n\n${mergeSummary(plan, options)}`);
+	return ctx.ui.confirm(title, `${lead}\n\n${mergeConfirmSummary(plan, options)}`);
 }
 
 async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: string): Promise<void> {
@@ -829,7 +844,7 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
 
-	const guidance = forkGuidanceMessage(forkMetadata.parentSessionFile, forkMetadata.forkedSessionFile);
+	const guidance = forkGuidanceMessage(forkMetadata.parentSessionFile);
 	appendForkMetadata(sourceManager, { ...forkMetadata, recordedIn: "child" });
 	sourceManager.appendCustomMessageEntry(FUX_CUSTOM_TYPE, guidance, true, {
 		kind: "fork_guidance",
@@ -913,8 +928,8 @@ async function doMergeFux(args: string, ctx: ExtensionCommandContext): Promise<s
 		plan,
 		options,
 		ctx,
-		"Merge /fux child session?",
-		"This writes the child branch into the parent session tree and creates a backup first. Make sure the parent pane/session is at rest.",
+		"Merge /fux fork?",
+		"This writes the fork branch into the parent session and creates a backup first.",
 	);
 	if (!ok) {
 		return "Cancelled /fux merge.";
@@ -922,7 +937,7 @@ async function doMergeFux(args: string, ctx: ExtensionCommandContext): Promise<s
 
 	await writeFuxMerge(plan);
 	const cleanupMessage = options.deleteFork ? await cleanupForkAfterMerge(plan, ctx) : undefined;
-	return `Merged /fux branch into parent session.${cleanupMessage ? ` ${cleanupMessage}` : ""}\n${mergeSummary(plan, options)}`;
+	return mergeCompleteMessage(plan, cleanupMessage);
 }
 
 async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
