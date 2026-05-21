@@ -1,10 +1,80 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { copyFile, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const COMMAND_NAME = "fux";
+const MERGE_COMMAND_NAME = "merge-fux";
+const MERGE_ALIAS_COMMAND_NAME = "fux-merge";
+const FUX_CUSTOM_TYPE = "fux";
+const FUX_METADATA_VERSION = 1;
+
+type JsonObject = Record<string, unknown>;
+
+type SessionHeader = JsonObject & {
+	type: "session";
+	parentSession?: string;
+};
+
+type SessionEntry = JsonObject & {
+	type: string;
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+};
+
+type FileEntry = SessionHeader | SessionEntry;
+
+type FuxForkMetadata = {
+	kind: "fork";
+	version: number;
+	parentSessionFile: string;
+	forkedSessionFile: string;
+	forkedFromEntryId: string;
+	createdAt: string;
+};
+
+type FuxMergeMetadata = {
+	kind: "merge";
+	version: number;
+	childSessionFile: string;
+	forkedFromEntryId: string;
+	mergedEntryCount: number;
+	mergedLeafId: string | null;
+	backupFile: string;
+	mergedAt: string;
+};
+
+type ParsedSession = {
+	header: SessionHeader;
+	fileEntries: FileEntry[];
+	sessionEntries: SessionEntry[];
+};
+
+type MergeOptions = {
+	yes: boolean;
+	dryRun: boolean;
+	childSessionPath?: string;
+};
+
+type MergePlan = {
+	parentSessionFile: string;
+	childSessionFile: string;
+	forkedFromEntryId: string;
+	childLeafId: string | null;
+	mergedLeafId: string | null;
+	entriesToAppend: SessionEntry[];
+	parentFileEntries: FileEntry[];
+	parentStat: {
+		size: number;
+		mtimeMs: number;
+	};
+	backupFile: string;
+	duplicateCount: number;
+};
 
 function getPiPackageRoot(): string {
 	const argvPath = process.argv[1];
@@ -16,7 +86,12 @@ function getPiPackageRoot(): string {
 }
 
 async function loadSessionManager(): Promise<{
-	SessionManager: { open(path: string, sessionDir?: string): { createBranchedSession(leafId: string): string | undefined } };
+	SessionManager: {
+		open(path: string, sessionDir?: string): {
+			createBranchedSession(leafId: string): string | undefined;
+			appendCustomEntry(customType: string, data?: unknown): string;
+		};
+	};
 }> {
 	const packageRoot = getPiPackageRoot();
 	const sessionManagerPath = pathToFileURL(join(packageRoot, "dist/core/session-manager.js")).href;
@@ -133,7 +208,7 @@ async function runTmuxSplit(command: string, cwd: string): Promise<void> {
 		throw new Error("Not running inside tmux; cannot create a tmux pane.");
 	}
 
-	await new Promise<void>((resolve, reject) => {
+	await new Promise<void>((resolvePromise, reject) => {
 		const child = spawn("tmux", ["split-window", "-h", "-c", cwd, command], {
 			stdio: "ignore",
 			detached: true,
@@ -142,12 +217,381 @@ async function runTmuxSplit(command: string, cwd: string): Promise<void> {
 		child.once("error", reject);
 		child.once("exit", (code) => {
 			if (code === 0) {
-				resolve();
+				resolvePromise();
 				return;
 			}
 			reject(new Error(`tmux split-window exited with code ${code ?? "unknown"}`));
 		});
 	});
+}
+
+function appendForkMetadata(
+	sessionManager: { appendCustomEntry(customType: string, data?: unknown): string },
+	metadata: FuxForkMetadata,
+): void {
+	sessionManager.appendCustomEntry(FUX_CUSTOM_TYPE, metadata);
+}
+
+function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
+	if (ctx.hasUI) {
+		ctx.ui.notify(message, level);
+	}
+}
+
+function canonicalPath(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+function samePath(a: string, b: string): boolean {
+	return canonicalPath(a) === canonicalPath(b);
+}
+
+function expandHome(path: string): string {
+	if (path === "~") {
+		return process.env.HOME ?? path;
+	}
+	if (path.startsWith("~/")) {
+		return join(process.env.HOME ?? "~", path.slice(2));
+	}
+	return path;
+}
+
+function resolveSessionPath(path: string, cwd: string): string {
+	const expanded = expandHome(path);
+	return resolve(cwd, expanded);
+}
+
+function parseMergeArgs(args: string): MergeOptions {
+	const options: MergeOptions = { yes: false, dryRun: false };
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+
+	for (const part of parts) {
+		if (part === "--yes" || part === "-y") {
+			options.yes = true;
+			continue;
+		}
+		if (part === "--dry-run" || part === "-n") {
+			options.dryRun = true;
+			continue;
+		}
+		if (!options.childSessionPath) {
+			options.childSessionPath = part;
+			continue;
+		}
+		throw new Error(`Unexpected /${MERGE_COMMAND_NAME} argument: ${part}`);
+	}
+
+	return options;
+}
+
+async function readSession(path: string): Promise<ParsedSession> {
+	const content = await readFile(path, "utf8");
+	const fileEntries: FileEntry[] = [];
+
+	for (const [index, line] of content.split("\n").entries()) {
+		if (!line.trim()) continue;
+		try {
+			fileEntries.push(JSON.parse(line) as FileEntry);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Invalid JSON in ${path}:${index + 1}: ${message}`);
+		}
+	}
+
+	const header = fileEntries[0];
+	if (!header || header.type !== "session") {
+		throw new Error(`Session file has no session header: ${path}`);
+	}
+
+	const sessionEntries = fileEntries.slice(1).filter(isSessionEntry);
+	return { header: header as SessionHeader, fileEntries, sessionEntries };
+}
+
+function isSessionEntry(entry: FileEntry): entry is SessionEntry {
+	return (
+		entry.type !== "session" &&
+		typeof (entry as JsonObject).id === "string" &&
+		((entry as JsonObject).parentId === null || typeof (entry as JsonObject).parentId === "string")
+	);
+}
+
+function stringifySession(entries: FileEntry[]): string {
+	return `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+}
+
+function getLeafId(entries: SessionEntry[]): string | null {
+	return entries.at(-1)?.id ?? null;
+}
+
+function indexEntries(entries: SessionEntry[]): Map<string, SessionEntry> {
+	return new Map(entries.map((entry) => [entry.id, entry]));
+}
+
+function getBranch(entries: SessionEntry[], leafId: string | null): SessionEntry[] {
+	if (!leafId) return [];
+
+	const byId = indexEntries(entries);
+	const branch: SessionEntry[] = [];
+	let current = byId.get(leafId);
+	const seen = new Set<string>();
+
+	while (current) {
+		if (seen.has(current.id)) {
+			throw new Error(`Session tree contains a cycle at entry ${current.id}`);
+		}
+		seen.add(current.id);
+		branch.unshift(current);
+		current = current.parentId ? byId.get(current.parentId) : undefined;
+	}
+
+	return branch;
+}
+
+function fuxData(entry: SessionEntry): JsonObject | undefined {
+	if (entry.type !== "custom") return undefined;
+	if ((entry as JsonObject).customType !== FUX_CUSTOM_TYPE) return undefined;
+	const data = (entry as JsonObject).data;
+	return data && typeof data === "object" ? (data as JsonObject) : undefined;
+}
+
+function isFuxForkMetadata(data: JsonObject | undefined): data is FuxForkMetadata & JsonObject {
+	return (
+		data?.kind === "fork" &&
+		typeof data.parentSessionFile === "string" &&
+		typeof data.forkedFromEntryId === "string"
+	);
+}
+
+function isSkippableFuxEntry(entry: SessionEntry): boolean {
+	const data = fuxData(entry);
+	return data?.kind === "fork" || data?.kind === "merge";
+}
+
+function findForkMetadata(childEntries: SessionEntry[], parentSessionFile: string): FuxForkMetadata | undefined {
+	for (let index = childEntries.length - 1; index >= 0; index--) {
+		const data = fuxData(childEntries[index]);
+		if (!isFuxForkMetadata(data)) continue;
+		if (samePath(data.parentSessionFile, parentSessionFile)) {
+			return data;
+		}
+	}
+	return undefined;
+}
+
+function inferForkSourceEntryId(childBranch: SessionEntry[], parentById: Map<string, SessionEntry>): string | undefined {
+	let lastMatchingEntryId: string | undefined;
+
+	for (const childEntry of childBranch) {
+		const parentEntry = parentById.get(childEntry.id);
+		if (!parentEntry) {
+			break;
+		}
+		if (JSON.stringify(parentEntry) !== JSON.stringify(childEntry)) {
+			break;
+		}
+		lastMatchingEntryId = childEntry.id;
+	}
+
+	return lastMatchingEntryId;
+}
+
+function deepCloneEntry(entry: SessionEntry): SessionEntry {
+	return JSON.parse(JSON.stringify(entry)) as SessionEntry;
+}
+
+function generateEntryId(usedIds: Set<string>): string {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		const id = randomUUID().slice(0, 8);
+		if (!usedIds.has(id)) return id;
+	}
+
+	let id = randomUUID();
+	while (usedIds.has(id)) {
+		id = randomUUID();
+	}
+	return id;
+}
+
+function remapReference(value: unknown, idMap: Map<string, string>): unknown {
+	return typeof value === "string" ? idMap.get(value) ?? value : value;
+}
+
+function remapEntryReferences(entry: SessionEntry, idMap: Map<string, string>): void {
+	if (entry.type === "compaction") {
+		(entry as JsonObject).firstKeptEntryId = remapReference((entry as JsonObject).firstKeptEntryId, idMap);
+	}
+
+	if (entry.type === "branch_summary") {
+		(entry as JsonObject).fromId = remapReference((entry as JsonObject).fromId, idMap);
+	}
+
+	if (entry.type === "label") {
+		(entry as JsonObject).targetId = remapReference((entry as JsonObject).targetId, idMap);
+	}
+}
+
+function shouldSkipLabel(entry: SessionEntry, idMap: Map<string, string>): boolean {
+	if (entry.type !== "label") return false;
+	const targetId = (entry as JsonObject).targetId;
+	return typeof targetId !== "string" || !idMap.has(targetId);
+}
+
+function appendPreserveLeafMarker(
+	entries: FileEntry[],
+	usedIds: Set<string>,
+	parentOldLeafId: string | null,
+	data: FuxMergeMetadata,
+): SessionEntry | undefined {
+	if (!parentOldLeafId) return undefined;
+
+	const marker: SessionEntry = {
+		type: "custom",
+		id: generateEntryId(usedIds),
+		parentId: parentOldLeafId,
+		timestamp: new Date().toISOString(),
+		customType: FUX_CUSTOM_TYPE,
+		data,
+	};
+	entries.push(marker);
+	usedIds.add(marker.id);
+	return marker;
+}
+
+async function planFuxMerge(childSessionFile: string): Promise<MergePlan> {
+	const child = await readSession(childSessionFile);
+	const parentSessionFromHeader = child.header.parentSession;
+	if (!parentSessionFromHeader) {
+		throw new Error("This session does not record a parentSession; it does not look like a /fux child session.");
+	}
+
+	const parentSessionFile = canonicalPath(parentSessionFromHeader);
+	if (!existsSync(parentSessionFile)) {
+		throw new Error(`Parent session file does not exist: ${parentSessionFile}`);
+	}
+	if (samePath(parentSessionFile, childSessionFile)) {
+		throw new Error("Child session and parent session resolve to the same file; refusing to merge.");
+	}
+
+	const parent = await readSession(parentSessionFile);
+	const parentStat = statSync(parentSessionFile);
+	const parentById = indexEntries(parent.sessionEntries);
+	const childLeafId = getLeafId(child.sessionEntries);
+	const childBranch = getBranch(child.sessionEntries, childLeafId);
+	const forkMetadata = findForkMetadata(child.sessionEntries, parentSessionFile);
+	const forkedFromEntryId = forkMetadata?.forkedFromEntryId ?? inferForkSourceEntryId(childBranch, parentById);
+
+	if (!forkedFromEntryId) {
+		throw new Error("Could not determine where the child forked from. New /fux sessions record this automatically; older sessions may need manual merging.");
+	}
+	if (!parentById.has(forkedFromEntryId)) {
+		throw new Error(`Parent session does not contain fork source entry ${forkedFromEntryId}.`);
+	}
+
+	const sourceIndex = childBranch.findIndex((entry) => entry.id === forkedFromEntryId);
+	if (sourceIndex < 0) {
+		throw new Error(`Child active branch does not descend from fork source ${forkedFromEntryId}.`);
+	}
+
+	const parentFileEntries = [...parent.fileEntries];
+	const parentOldLeafId = getLeafId(parent.sessionEntries);
+	const usedIds = new Set(parent.sessionEntries.map((entry) => entry.id));
+	const idMap = new Map<string, string>([[forkedFromEntryId, forkedFromEntryId]]);
+	const entriesToAppend: SessionEntry[] = [];
+	let duplicateCount = 0;
+
+	for (const childEntry of childBranch.slice(sourceIndex + 1)) {
+		const mappedParentId = childEntry.parentId ? idMap.get(childEntry.parentId) ?? childEntry.parentId : null;
+
+		if (isSkippableFuxEntry(childEntry) || shouldSkipLabel(childEntry, idMap)) {
+			if (mappedParentId) {
+				idMap.set(childEntry.id, mappedParentId);
+			}
+			continue;
+		}
+
+		const mergedEntry = deepCloneEntry(childEntry);
+		mergedEntry.parentId = mappedParentId;
+		remapEntryReferences(mergedEntry, idMap);
+
+		if (mergedEntry.parentId && !usedIds.has(mergedEntry.parentId)) {
+			throw new Error(`Cannot merge ${childEntry.id}: mapped parent ${mergedEntry.parentId} is not present in the parent session.`);
+		}
+
+		const existingEntry = parentById.get(mergedEntry.id);
+		if (existingEntry) {
+			if (JSON.stringify(existingEntry) === JSON.stringify(mergedEntry)) {
+				idMap.set(childEntry.id, mergedEntry.id);
+				duplicateCount++;
+				continue;
+			}
+
+			mergedEntry.id = generateEntryId(usedIds);
+		}
+
+		usedIds.add(mergedEntry.id);
+		idMap.set(childEntry.id, mergedEntry.id);
+		entriesToAppend.push(mergedEntry);
+		parentFileEntries.push(mergedEntry);
+	}
+
+	const mergedLeafId = childLeafId ? idMap.get(childLeafId) ?? null : null;
+	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const backupFile = `${parentSessionFile}.before-fux-merge-${timestamp}.bak`;
+
+	if (entriesToAppend.length > 0) {
+		appendPreserveLeafMarker(parentFileEntries, usedIds, parentOldLeafId, {
+			kind: "merge",
+			version: FUX_METADATA_VERSION,
+			childSessionFile: canonicalPath(childSessionFile),
+			forkedFromEntryId,
+			mergedEntryCount: entriesToAppend.length,
+			mergedLeafId,
+			backupFile,
+			mergedAt: new Date().toISOString(),
+		});
+	}
+
+	return {
+		parentSessionFile,
+		childSessionFile: canonicalPath(childSessionFile),
+		forkedFromEntryId,
+		childLeafId,
+		mergedLeafId,
+		entriesToAppend,
+		parentFileEntries,
+		parentStat: {
+			size: parentStat.size,
+			mtimeMs: parentStat.mtimeMs,
+		},
+		backupFile,
+		duplicateCount,
+	};
+}
+
+async function writeFuxMerge(plan: MergePlan): Promise<void> {
+	const latestStat = statSync(plan.parentSessionFile);
+	if (plan.parentStat.mtimeMs !== latestStat.mtimeMs || plan.parentStat.size !== latestStat.size) {
+		throw new Error("Parent session changed while preparing the merge; aborting. Re-run /merge-fux when it is at rest.");
+	}
+
+	await copyFile(plan.parentSessionFile, plan.backupFile);
+	await writeFile(plan.parentSessionFile, stringifySession(plan.parentFileEntries), "utf8");
+}
+
+function mergeSummary(plan: MergePlan): string {
+	return [
+		`child: ${plan.childSessionFile}`,
+		`parent: ${plan.parentSessionFile}`,
+		`fork source: ${plan.forkedFromEntryId}`,
+		`entries to merge: ${plan.entriesToAppend.length}`,
+		`already present: ${plan.duplicateCount}`,
+		`merged leaf: ${plan.mergedLeafId ?? "(none)"}`,
+		`backup: ${plan.backupFile}`,
+	].join("\n");
 }
 
 async function fux(ctx: ExtensionCommandContext): Promise<void> {
@@ -181,9 +625,68 @@ async function fux(ctx: ExtensionCommandContext): Promise<void> {
 		return;
 	}
 
+	appendForkMetadata(sourceManager, {
+		kind: "fork",
+		version: FUX_METADATA_VERSION,
+		parentSessionFile: canonicalPath(currentSessionFile),
+		forkedSessionFile: canonicalPath(forkedSessionFile),
+		forkedFromEntryId: leafId,
+		createdAt: new Date().toISOString(),
+	});
+
 	const command = buildPiCommand(forkedSessionFile);
 	await runTmuxSplit(command, ctx.cwd);
 	ctx.ui.notify(`Fork opened in a new tmux pane: ${forkedSessionFile}`, "info");
+}
+
+async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
+	if (!ctx.isIdle()) {
+		notify(ctx, "Press Escape to stop the current turn, then run /merge-fux again.", "warning");
+		return;
+	}
+
+	const options = parseMergeArgs(args);
+	const currentSessionFile = ctx.sessionManager.getSessionFile();
+	if (!currentSessionFile && !options.childSessionPath) {
+		notify(ctx, "Cannot /merge-fux an in-memory session without an explicit child session path.", "warning");
+		return;
+	}
+
+	const childSessionFile = options.childSessionPath ? resolveSessionPath(options.childSessionPath, ctx.cwd) : currentSessionFile!;
+	if (!existsSync(childSessionFile)) {
+		notify(ctx, `Child session file does not exist: ${childSessionFile}`, "error");
+		return;
+	}
+
+	const plan = await planFuxMerge(childSessionFile);
+	if (currentSessionFile && samePath(currentSessionFile, plan.parentSessionFile)) {
+		notify(ctx, "Run /merge-fux from the child session, not from the parent session. Updating the active parent session file behind pi's back is unsafe.", "warning");
+		return;
+	}
+
+	if (plan.entriesToAppend.length === 0) {
+		notify(ctx, `Nothing new to merge.\n${mergeSummary(plan)}`, "info");
+		return;
+	}
+
+	if (options.dryRun) {
+		notify(ctx, `Dry run only; no files changed.\n${mergeSummary(plan)}`, "info");
+		return;
+	}
+
+	if (!options.yes && ctx.hasUI) {
+		const ok = await ctx.ui.confirm(
+			"Merge /fux child session?",
+			`This writes the child branch into the parent session tree and creates a backup first. Make sure the parent pane/session is at rest.\n\n${mergeSummary(plan)}`,
+		);
+		if (!ok) {
+			notify(ctx, "Cancelled /merge-fux.", "warning");
+			return;
+		}
+	}
+
+	await writeFuxMerge(plan);
+	notify(ctx, `Merged /fux branch into parent session.\n${mergeSummary(plan)}`, "info");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -197,5 +700,23 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`/fux failed: ${message}`, "error");
 			}
 		},
+	});
+
+	const mergeCommand = {
+		description: "Merge the active /fux child session back into its parent session tree. Usage: /merge-fux [--dry-run] [--yes]",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			try {
+				await mergeFux(args, ctx);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				notify(ctx, `/${MERGE_COMMAND_NAME} failed: ${message}`, "error");
+			}
+		},
+	};
+
+	pi.registerCommand(MERGE_COMMAND_NAME, mergeCommand);
+	pi.registerCommand(MERGE_ALIAS_COMMAND_NAME, {
+		...mergeCommand,
+		description: "Alias for /merge-fux.",
 	});
 }
