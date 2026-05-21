@@ -7,8 +7,6 @@ import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const COMMAND_NAME = "fux";
-const MERGE_COMMAND_NAME = "merge-fux";
-const MERGE_ALIAS_COMMAND_NAME = "fux-merge";
 const FUX_CUSTOM_TYPE = "fux";
 const FUX_METADATA_VERSION = 1;
 
@@ -35,6 +33,7 @@ type FuxForkMetadata = {
 	forkedSessionFile: string;
 	forkedFromEntryId: string;
 	createdAt: string;
+	recordedIn?: "parent" | "child";
 };
 
 type FuxMergeMetadata = {
@@ -232,6 +231,10 @@ function appendForkMetadata(
 	sessionManager.appendCustomEntry(FUX_CUSTOM_TYPE, metadata);
 }
 
+function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): void {
+	pi.appendEntry(FUX_CUSTOM_TYPE, metadata);
+}
+
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx.hasUI) {
 		ctx.ui.notify(message, level);
@@ -282,7 +285,7 @@ function parseMergeArgs(args: string): MergeOptions {
 			options.childSessionPath = part;
 			continue;
 		}
-		throw new Error(`Unexpected /${MERGE_COMMAND_NAME} argument: ${part}`);
+		throw new Error(`Unexpected /fux merge argument: ${part}`);
 	}
 
 	return options;
@@ -575,7 +578,7 @@ async function planFuxMerge(childSessionFile: string): Promise<MergePlan> {
 async function writeFuxMerge(plan: MergePlan): Promise<void> {
 	const latestStat = statSync(plan.parentSessionFile);
 	if (plan.parentStat.mtimeMs !== latestStat.mtimeMs || plan.parentStat.size !== latestStat.size) {
-		throw new Error("Parent session changed while preparing the merge; aborting. Re-run /merge-fux when it is at rest.");
+		throw new Error("Parent session changed while preparing the merge; aborting. Re-run /fux merge when it is at rest.");
 	}
 
 	await copyFile(plan.parentSessionFile, plan.backupFile);
@@ -594,7 +597,7 @@ function mergeSummary(plan: MergePlan): string {
 	].join("\n");
 }
 
-async function fux(ctx: ExtensionCommandContext): Promise<void> {
+async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
 	if (!ctx.isIdle()) {
 		ctx.ui.notify("Press Escape to stop the current turn, then run /fux again.", "warning");
 		return;
@@ -625,14 +628,17 @@ async function fux(ctx: ExtensionCommandContext): Promise<void> {
 		return;
 	}
 
-	appendForkMetadata(sourceManager, {
-		kind: "fork",
+	const forkMetadata = {
+		kind: "fork" as const,
 		version: FUX_METADATA_VERSION,
 		parentSessionFile: canonicalPath(currentSessionFile),
 		forkedSessionFile: canonicalPath(forkedSessionFile),
 		forkedFromEntryId: leafId,
 		createdAt: new Date().toISOString(),
-	});
+	};
+
+	appendForkMetadata(sourceManager, { ...forkMetadata, recordedIn: "child" });
+	appendParentForkMetadata(pi, { ...forkMetadata, recordedIn: "parent" });
 
 	const command = buildPiCommand(forkedSessionFile);
 	await runTmuxSplit(command, ctx.cwd);
@@ -641,14 +647,14 @@ async function fux(ctx: ExtensionCommandContext): Promise<void> {
 
 async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
 	if (!ctx.isIdle()) {
-		notify(ctx, "Press Escape to stop the current turn, then run /merge-fux again.", "warning");
+		notify(ctx, "Press Escape to stop the current turn, then run /fux merge again.", "warning");
 		return;
 	}
 
 	const options = parseMergeArgs(args);
 	const currentSessionFile = ctx.sessionManager.getSessionFile();
 	if (!currentSessionFile && !options.childSessionPath) {
-		notify(ctx, "Cannot /merge-fux an in-memory session without an explicit child session path.", "warning");
+		notify(ctx, "Cannot /fux merge an in-memory session without an explicit child session path.", "warning");
 		return;
 	}
 
@@ -660,7 +666,7 @@ async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<voi
 
 	const plan = await planFuxMerge(childSessionFile);
 	if (currentSessionFile && samePath(currentSessionFile, plan.parentSessionFile)) {
-		notify(ctx, "Run /merge-fux from the child session, not from the parent session. Updating the active parent session file behind pi's back is unsafe.", "warning");
+		notify(ctx, "Run /fux merge from the child session, not from the parent session. Updating the active parent session file behind pi's back is unsafe.", "warning");
 		return;
 	}
 
@@ -680,7 +686,7 @@ async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<voi
 			`This writes the child branch into the parent session tree and creates a backup first. Make sure the parent pane/session is at rest.\n\n${mergeSummary(plan)}`,
 		);
 		if (!ok) {
-			notify(ctx, "Cancelled /merge-fux.", "warning");
+			notify(ctx, "Cancelled /fux merge.", "warning");
 			return;
 		}
 	}
@@ -689,34 +695,40 @@ async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<voi
 	notify(ctx, `Merged /fux branch into parent session.\n${mergeSummary(plan)}`, "info");
 }
 
+function splitSubcommand(args: string): { subcommand: string; rest: string } | undefined {
+	const trimmed = args.trim();
+	if (!trimmed) return undefined;
+	const match = trimmed.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+	if (!match) return undefined;
+	return { subcommand: match[1].toLowerCase(), rest: match[2] ?? "" };
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Fork the current session position into a new tmux pane using the same pi startup args.",
-		handler: async (_args, ctx) => {
+		description: "Fork the current session, or merge a child session with /fux merge [--dry-run] [--yes].",
+		handler: async (args, ctx) => {
 			try {
-				await fux(ctx);
+				const parsed = splitSubcommand(args);
+				if (!parsed) {
+					await fux(ctx, pi);
+					return;
+				}
+
+				if (parsed.subcommand === "merge") {
+					await mergeFux(parsed.rest, ctx);
+					return;
+				}
+
+				if (parsed.subcommand === "help" || parsed.subcommand === "--help" || parsed.subcommand === "-h") {
+					notify(ctx, "Usage: /fux to fork, or /fux merge [--dry-run] [--yes] [child-session-path] to merge a child session.", "info");
+					return;
+				}
+
+				notify(ctx, `Unknown /fux subcommand: ${parsed.subcommand}. Usage: /fux [merge ...]`, "warning");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`/fux failed: ${message}`, "error");
+				notify(ctx, `/fux failed: ${message}`, "error");
 			}
 		},
-	});
-
-	const mergeCommand = {
-		description: "Merge the active /fux child session back into its parent session tree. Usage: /merge-fux [--dry-run] [--yes]",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			try {
-				await mergeFux(args, ctx);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				notify(ctx, `/${MERGE_COMMAND_NAME} failed: ${message}`, "error");
-			}
-		},
-	};
-
-	pi.registerCommand(MERGE_COMMAND_NAME, mergeCommand);
-	pi.registerCommand(MERGE_ALIAS_COMMAND_NAME, {
-		...mergeCommand,
-		description: "Alias for /merge-fux.",
 	});
 }
