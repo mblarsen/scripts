@@ -50,7 +50,7 @@ Before forking, tell the user the merge workflow in plain language:
 
 > This creates a /fux fork. To merge back, preview first, then execute the merge. After the merge, restart the parent using the command printed by fux.
 
-The extension writes a visible reminder into both the parent session and the fork session.
+The extension writes role-specific visible reminders into both sessions: the parent says it is the parent, and the fork says it is the child and names the parent as its merge target.
 
 ## Merge Triggers
 

@@ -285,10 +285,21 @@ function parentRestartCommand(parentSessionFile: string): string {
 	return `pi --resume ${parentSessionFile}`;
 }
 
-function forkGuidanceMessage(parentSessionFile: string): string {
+function parentForkGuidanceMessage(parentSessionFile: string): string {
 	return [
-		"A fork has been started in another pane.",
-		"When merging back, restart this instance using:",
+		"A fux child fork has been started in another pane.",
+		"This pane is the parent. The other pane is the child fork.",
+		"When the child merges back, restart this parent using:",
+		parentRestartCommand(parentSessionFile),
+	].join("\n");
+}
+
+function childForkGuidanceMessage(parentSessionFile: string): string {
+	return [
+		"This pane is a fux child fork.",
+		"Merge target: the parent session that created this fork.",
+		"When ready, preview with fux_merge action=preview, then execute with fux_merge action=execute.",
+		"After merging, restart the parent using:",
 		parentRestartCommand(parentSessionFile),
 	].join("\n");
 }
@@ -822,10 +833,12 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
 
-	const guidance = forkGuidanceMessage(forkMetadata.parentSessionFile);
+	const childGuidance = childForkGuidanceMessage(forkMetadata.parentSessionFile);
+	const parentGuidance = parentForkGuidanceMessage(forkMetadata.parentSessionFile);
 	appendForkMetadata(sourceManager, { ...forkMetadata, recordedIn: "child" });
-	sourceManager.appendCustomMessageEntry(FUX_CUSTOM_TYPE, guidance, true, {
+	sourceManager.appendCustomMessageEntry(FUX_CUSTOM_TYPE, childGuidance, true, {
 		kind: "fork_guidance",
+		role: "child",
 		version: FUX_METADATA_VERSION,
 		parentSessionFile: forkMetadata.parentSessionFile,
 		forkedSessionFile: forkMetadata.forkedSessionFile,
@@ -833,10 +846,11 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 	appendParentForkMetadata(pi, { ...forkMetadata, recordedIn: "parent" });
 	pi.sendMessage({
 		customType: FUX_CUSTOM_TYPE,
-		content: guidance,
+		content: parentGuidance,
 		display: true,
 		details: {
 			kind: "fork_guidance",
+			role: "parent",
 			version: FUX_METADATA_VERSION,
 			parentSessionFile: forkMetadata.parentSessionFile,
 			forkedSessionFile: forkMetadata.forkedSessionFile,
