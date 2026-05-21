@@ -739,27 +739,22 @@ async function confirmMergeAction(plan: MergePlan, options: MergeOptions, ctx: E
 	return ctx.ui.confirm(title, `${lead}\n\n${mergeSummary(plan, options)}`);
 }
 
-async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: string): Promise<void> {
-	if (!ctx.isIdle()) {
-		ctx.ui.notify("Press Escape to stop the current turn, then run /fux again.", "warning");
-		return;
-	}
-
+async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: string): Promise<void> {
 	const currentSessionFile = ctx.sessionManager.getSessionFile();
 	if (!currentSessionFile) {
 		ctx.ui.notify("Cannot /fux an in-memory session. Start pi with session persistence enabled.", "warning");
-		return;
+		throw new Error("No persisted session");
 	}
 
 	if (!existsSync(currentSessionFile)) {
 		ctx.ui.notify("Current session has not been written to disk yet, so there is nothing to fork.", "warning");
-		return;
+		throw new Error("Session not written to disk");
 	}
 
 	const leafId = ctx.sessionManager.getLeafId();
 	if (!leafId) {
 		ctx.ui.notify("Current session has no messages to fork yet.", "warning");
-		return;
+		throw new Error("No leaf id");
 	}
 
 	const { SessionManager } = await loadSessionManager();
@@ -767,7 +762,7 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: stri
 	const forkedSessionFile = sourceManager.createBranchedSession(leafId);
 	if (!forkedSessionFile) {
 		ctx.ui.notify("Failed to create a persisted fork for this session.", "error");
-		return;
+		throw new Error("Failed to create branched session");
 	}
 
 	const childPrompt = normalizePromptInput(prompt);
@@ -798,6 +793,17 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: stri
 		await sendPromptToPane(paneId, childPrompt);
 	}
 	ctx.ui.notify(`Fork opened in a new tmux pane: ${forkedSessionFile}${childPrompt ? " and prompt sent" : ""}`, "info");
+}
+
+async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: string): Promise<void> {
+	if (!ctx.isIdle()) {
+		const fuxCmd = prompt ? `/fux prompt ${prompt}` : "/fux";
+		pi.sendUserMessage(fuxCmd, { deliverAs: "nextTurn" });
+		ctx.ui.notify(`Queued /fux for when this turn finishes. Fork will open in a new tmux pane.`, "info");
+		return;
+	}
+
+	await doFux(pi, ctx, prompt);
 }
 
 async function mergeFux(args: string, ctx: ExtensionCommandContext): Promise<void> {
