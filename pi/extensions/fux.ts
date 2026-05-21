@@ -367,7 +367,7 @@ function wrapPlain(text: string, width: number): string[] {
 function renderFuxWidgetLines(state: FuxWidgetState, width: number): string[] {
 	if (state.role === "child") {
 		return [
-			widgetTop("fux", "", width),
+			widgetTop("fux", "fork", width),
 			widgetLine(" Use `/fux merge` to combine with parent session again.", width),
 			widgetBottom(width),
 		];

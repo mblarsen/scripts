@@ -48,7 +48,7 @@ Before forking, tell the user the merge workflow in plain language:
 The extension writes role-specific visible reminders into both sessions and shows a short above-editor fux widget:
 
 - parent widget: says this pane is the parent and shows the restart command
-- child widget: only reminds the user to run `/fux merge` to combine with the parent again
+- fork widget: only reminds the user to run `/fux merge` to combine with the parent again
 - `/fux toggle` turns the widget on/off for the current branch
 
 ## Merge or Discard
