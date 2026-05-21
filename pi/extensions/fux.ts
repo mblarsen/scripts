@@ -4,6 +4,7 @@ import { copyFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { pathToFileURL } from "node:url";
 
 const COMMAND_NAME = "fux";
@@ -869,8 +870,51 @@ function splitSubcommand(args: string): { subcommand: string; rest: string } | u
 }
 
 export default function (pi: ExtensionAPI) {
+	const FUX_SUBCOMMANDS: AutocompleteItem[] = [
+		{ value: "prompt", label: "prompt", description: "Fork session with an initial prompt" },
+		{ value: "merge", label: "merge", description: "Merge child fork into parent session" },
+		{ value: "help", label: "help", description: "Show usage information" },
+	];
+
+	const MERGE_FLAGS: AutocompleteItem[] = [
+		{ value: "--yes", label: "--yes", description: "Skip confirmation prompt" },
+		{ value: "--dry-run", label: "--dry-run", description: "Show what would happen without making changes" },
+		{ value: "--keep", label: "--keep", description: "Keep fork session file after merge" },
+		{ value: "--delete", label: "--delete", description: "Delete fork after merge (default)" },
+	];
+
 	pi.registerCommand(COMMAND_NAME, {
 		description: "Fork the current session with /fux prompt [text], or merge a child session with /fux merge [--dry-run] [--yes] [--keep].",
+		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+			const trimmed = prefix.trim();
+
+			// Completing the subcommand itself
+			if (!trimmed || !trimmed.includes(" ")) {
+				const matching = FUX_SUBCOMMANDS.filter((s) => s.value.startsWith(trimmed));
+				return matching.length > 0 ? matching : null;
+			}
+
+			// Parse "subcommand rest"
+			const spaceIdx = trimmed.indexOf(" ");
+			const subcommand = trimmed.slice(0, spaceIdx).toLowerCase();
+			const rest = trimmed.slice(spaceIdx + 1);
+
+			if (subcommand === "merge") {
+				const usedFlags = new Set(rest.split(/\s+/).filter((p) => p.startsWith("--")));
+				const available = MERGE_FLAGS.filter((f) => !usedFlags.has(f.value));
+				const currentWord = rest.split(/\s+/).at(-1) ?? "";
+
+				if (currentWord.startsWith("-")) {
+					const matching = available.filter((f) => f.value.startsWith(currentWord));
+					return matching.length > 0 ? matching : null;
+				}
+
+				return available;
+			}
+
+			// prompt subcommand — free text, no completions
+			return null;
+		},
 		handler: async (args, ctx) => {
 			try {
 				const parsed = splitSubcommand(args);
