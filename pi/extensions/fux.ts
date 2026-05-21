@@ -256,6 +256,10 @@ async function runTmuxSplit(command: string, cwd: string): Promise<string> {
 
 async function getCurrentTmuxPaneId(): Promise<string | undefined> {
 	if (!process.env.TMUX) return undefined;
+	// TMUX_PANE is set by tmux for processes started inside a pane and points to
+	// the exact pane running this pi process. Using display-message without -t can
+	// resolve to the client's active pane instead, which is wrong for merge cleanup.
+	if (process.env.TMUX_PANE) return process.env.TMUX_PANE;
 	try {
 		return await runTmux(["display-message", "-p", "#{pane_id}"], "tmux display-message");
 	} catch {
