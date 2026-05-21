@@ -35,6 +35,7 @@ type FuxForkMetadata = {
 	forkedFromEntryId: string;
 	createdAt: string;
 	prompt?: string;
+	mergeReminder?: string;
 	recordedIn?: "parent" | "child";
 };
 
@@ -769,13 +770,20 @@ async function fux(ctx: ExtensionCommandContext, pi: ExtensionAPI, prompt?: stri
 	}
 
 	const childPrompt = normalizePromptInput(prompt);
-	const forkMetadata = {
+	const forkMetadata: FuxForkMetadata = {
 		kind: "fork" as const,
 		version: FUX_METADATA_VERSION,
 		parentSessionFile: canonicalPath(currentSessionFile),
 		forkedSessionFile: canonicalPath(forkedSessionFile),
 		forkedFromEntryId: leafId,
 		createdAt: new Date().toISOString(),
+		mergeReminder: [
+			"This is a /fux fork. When merging back:",
+			"  1. Run /fux merge --dry-run to preview",
+			"  2. Run /fux merge --yes to merge into parent",
+			"  3. Restart the parent pi session (pi --resume <parent-path>)",
+			"  4. The fork session is deleted and this pane closes",
+		].join("\n"),
 		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
 

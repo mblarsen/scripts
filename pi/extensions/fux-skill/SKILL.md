@@ -34,6 +34,25 @@ Example prompts to the user:
 
 If the user agrees, run `/fux` or `/fux prompt [your intent]`.
 
+## Explain Before Forking
+
+Before forking, tell the user how merging works so they are not surprised:
+
+> This is a /fux fork. To merge back: run `/fux merge --dry-run` to preview, then `/fux merge --yes` to merge. The fork session is deleted and this pane closes. Restart the parent pi session with `pi --resume <parent-path>`.
+
+The fork session itself contains a reminder entry with these instructions.
+
+## Merge Triggers
+
+When the user signals they are done with the fork, check whether they want to merge. Common triggers:
+
+- "great, we agree on the format, let's merge back the work"
+- "okay we are done, let's merge back the fork"
+- "let's go back to the main session"
+- "let's integrate this into the parent"
+
+If the user says something like this, run `/fux merge --dry-run` and ask if they want to proceed. If they say yes, run `/fux merge --yes`.
+
 ## After Merging
 
 When `/fux merge --yes` completes, the child session file is deleted and the fork pane closes. The parent session's JSON was edited externally.
