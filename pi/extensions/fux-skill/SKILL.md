@@ -32,13 +32,18 @@ Example prompts to the user:
 - "Want to fork off and explore this in more detail?"
 - "Should we split off to discuss this separately?"
 
-If the user agrees, run `/fux` or `/fux prompt [your intent]`.
+You can call these as slash commands or as tools:
+
+| Tool | Description |
+|------|-------------|
+| `fux_fork` | Fork session in new tmux pane. Args: `prompt` (optional string) |
+| `fux_merge` | Merge fork back into parent. Args: `action` ("preview"\|"execute"), `childSessionPath` (optional), `keep` (optional bool) |
 
 ## Explain Before Forking
 
 Before forking, tell the user how merging works so they are not surprised:
 
-> This is a /fux fork. To merge back: run `/fux merge --dry-run` to preview, then `/fux merge --yes` to merge. The fork session is deleted and this pane closes. Restart the parent pi session with `pi --resume <parent-path>`.
+> This is a /fux fork. To merge back: use `fux_merge` with `action: "preview"` to see what's coming, then `fux_merge` with `action: "execute"` to merge. The fork session is deleted and this pane closes. Restart the parent pi session with `pi --resume <parent-path>`.
 
 The fork session itself contains a reminder entry with these instructions.
 
@@ -51,11 +56,11 @@ When the user signals they are done with the fork, check whether they want to me
 - "let's go back to the main session"
 - "let's integrate this into the parent"
 
-If the user says something like this, run `/fux merge --dry-run` and ask if they want to proceed. If they say yes, run `/fux merge --yes`.
+If the user says something like this, call `fux_merge` with `action: "preview"` to show the summary, ask if they want to proceed, then call `fux_merge` with `action: "execute"` if they say yes.
 
 ## After Merging
 
-When `/fux merge --yes` completes, the child session file is deleted and the fork pane closes. The parent session's JSON was edited externally.
+When `fux_merge` with `action: "execute"` completes, the child session file is deleted and the fork pane closes. The parent session's JSON was edited externally.
 
 **You must restart the parent pi session** to see the merged content:
 
