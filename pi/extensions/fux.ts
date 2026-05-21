@@ -335,7 +335,7 @@ function widgetTop(title: string, info: string, width: number): string {
 	if (width <= 1) return `${WIDGET_ACCENT}╭${WIDGET_RESET}`;
 	const inner = Math.max(0, width - 2);
 	const left = `─ ${title} `;
-	const right = ` ${info} ─`;
+	const right = info ? ` ${info} ─` : "";
 	const fill = "─".repeat(Math.max(0, inner - visibleLength(left) - visibleLength(right)));
 	return `${WIDGET_ACCENT}╭${truncatePlain(`${left}${fill}${right}`, inner).padEnd(inner, "─")}╮${WIDGET_RESET}`;
 }
@@ -365,15 +365,18 @@ function wrapPlain(text: string, width: number): string[] {
 }
 
 function renderFuxWidgetLines(state: FuxWidgetState, width: number): string[] {
-	const inner = Math.max(0, width - 4);
-	const lines = [widgetTop("Fux", state.role === "parent" ? "parent" : "child", width)];
-	if (state.role === "parent") {
-		lines.push(widgetLine(" Parent pane; child fork opened.", width));
-		lines.push(widgetLine(" After merge, restart:", width));
-	} else {
-		lines.push(widgetLine(" Child fork.", width));
-		lines.push(widgetLine(" Parent:", width));
+	if (state.role === "child") {
+		return [
+			widgetTop("fux", "", width),
+			widgetLine(" Use `/fux merge` to combine with parent session again.", width),
+			widgetBottom(width),
+		];
 	}
+
+	const inner = Math.max(0, width - 4);
+	const lines = [widgetTop("fux", "parent", width)];
+	lines.push(widgetLine(" Parent pane; child fork opened.", width));
+	lines.push(widgetLine(" After merge, restart:", width));
 	for (const chunk of wrapPlain(parentRestartCommand(state.parentSessionFile), inner)) {
 		lines.push(widgetLine(` ${chunk}`, width));
 	}
@@ -414,9 +417,9 @@ function findFuxWidgetState(ctx: ExtensionContext, respectVisibility = true): Fu
 		}
 	}
 
-	const recentBranch = branch.slice(Math.max(0, branch.length - 5));
-	for (let index = recentBranch.length - 1; index >= 0; index--) {
-		const metadata = maybeFuxForkMetadata(recentBranch[index]);
+	const parentSearchStart = respectVisibility ? Math.max(0, branch.length - 5) : 0;
+	for (let index = branch.length - 1; index >= parentSearchStart; index--) {
+		const metadata = maybeFuxForkMetadata(branch[index]);
 		if (metadata?.recordedIn === "parent") {
 			return {
 				role: "parent",
