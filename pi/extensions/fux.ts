@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { copyFile, readFile, unlink, writeFile } from "node:fs/promises";
@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 
 const COMMAND_NAME = "fux";
 const FUX_CUSTOM_TYPE = "fux";
+const FUX_WIDGET_KEY = "fux-status";
 const FUX_METADATA_VERSION = 1;
 
 type JsonObject = Record<string, unknown>;
@@ -49,6 +50,13 @@ type FuxMergeMetadata = {
 	mergedLeafId: string | null;
 	backupFile: string;
 	mergedAt: string;
+};
+
+type FuxWidgetState = {
+	role: "parent" | "child";
+	parentSessionFile: string;
+	forkedSessionFile: string;
+	prompt?: string;
 };
 
 type ParsedSession = {
@@ -302,6 +310,132 @@ function childForkGuidanceMessage(parentSessionFile: string): string {
 		"After merging, restart the parent using:",
 		parentRestartCommand(parentSessionFile),
 	].join("\n");
+}
+
+const WIDGET_ACCENT = "\x1b[38;2;77;163;255m";
+const WIDGET_RESET = "\x1b[0m";
+
+function visibleLength(text: string): number {
+	return text.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+function truncatePlain(text: string, width: number): string {
+	if (width <= 0) return "";
+	const chars = Array.from(text);
+	if (chars.length <= width) return text;
+	if (width === 1) return "…";
+	return `${chars.slice(0, width - 1).join("")}…`;
+}
+
+function widgetTop(title: string, info: string, width: number): string {
+	if (width <= 1) return `${WIDGET_ACCENT}╭${WIDGET_RESET}`;
+	const inner = Math.max(0, width - 2);
+	const left = `─ ${title} `;
+	const right = ` ${info} ─`;
+	const fill = "─".repeat(Math.max(0, inner - visibleLength(left) - visibleLength(right)));
+	return `${WIDGET_ACCENT}╭${truncatePlain(`${left}${fill}${right}`, inner).padEnd(inner, "─")}╮${WIDGET_RESET}`;
+}
+
+function widgetLine(text: string, width: number): string {
+	if (width <= 1) return `${WIDGET_ACCENT}│${WIDGET_RESET}`;
+	const inner = Math.max(0, width - 2);
+	const content = truncatePlain(text, inner);
+	return `${WIDGET_ACCENT}│${WIDGET_RESET}${content}${" ".repeat(Math.max(0, inner - visibleLength(content)))}${WIDGET_ACCENT}│${WIDGET_RESET}`;
+}
+
+function widgetBottom(width: number): string {
+	if (width <= 1) return `${WIDGET_ACCENT}╰${WIDGET_RESET}`;
+	return `${WIDGET_ACCENT}╰${"─".repeat(Math.max(0, width - 2))}╯${WIDGET_RESET}`;
+}
+
+function wrapPlain(text: string, width: number): string[] {
+	if (width <= 0) return [""];
+	const chunks: string[] = [];
+	let rest = text;
+	while (visibleLength(rest) > width) {
+		chunks.push(rest.slice(0, width));
+		rest = rest.slice(width);
+	}
+	chunks.push(rest);
+	return chunks;
+}
+
+function renderFuxWidgetLines(state: FuxWidgetState, width: number): string[] {
+	const inner = Math.max(0, width - 4);
+	const lines = [widgetTop("Fux", state.role === "parent" ? "parent" : "child fork", width)];
+	if (state.role === "parent") {
+		lines.push(widgetLine(" A fux child fork was started in another pane.", width));
+		lines.push(widgetLine(" When it merges back, restart this parent:", width));
+	} else {
+		lines.push(widgetLine(" This pane is a fux child fork.", width));
+		lines.push(widgetLine(" Merge target: the parent session that created it.", width));
+		lines.push(widgetLine(" Merge: fux_merge preview → execute", width));
+		lines.push(widgetLine(" Then restart the parent:", width));
+	}
+	for (const chunk of wrapPlain(parentRestartCommand(state.parentSessionFile), inner)) {
+		lines.push(widgetLine(` ${chunk}`, width));
+	}
+	lines.push(widgetBottom(width));
+	return lines;
+}
+
+function maybeFuxForkMetadata(entry: SessionEntry): (FuxForkMetadata & JsonObject) | undefined {
+	const data = fuxData(entry);
+	return isFuxForkMetadata(data) ? data : undefined;
+}
+
+function findFuxWidgetState(ctx: ExtensionContext): FuxWidgetState | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	const latestHideIndex = branch.findLastIndex((entry) => fuxData(entry)?.kind === "widget_hidden");
+
+	for (let index = branch.length - 1; index >= 0; index--) {
+		if (index < latestHideIndex) break;
+		const metadata = maybeFuxForkMetadata(branch[index]);
+		if (metadata?.recordedIn === "child") {
+			return {
+				role: "child",
+				parentSessionFile: metadata.parentSessionFile,
+				forkedSessionFile: metadata.forkedSessionFile,
+				prompt: metadata.prompt,
+			};
+		}
+	}
+
+	const recentBranch = branch.slice(Math.max(0, branch.length - 5));
+	for (let index = recentBranch.length - 1; index >= 0; index--) {
+		const absoluteIndex = branch.length - recentBranch.length + index;
+		if (absoluteIndex < latestHideIndex) break;
+		const metadata = maybeFuxForkMetadata(recentBranch[index]);
+		if (metadata?.recordedIn === "parent") {
+			return {
+				role: "parent",
+				parentSessionFile: metadata.parentSessionFile,
+				forkedSessionFile: metadata.forkedSessionFile,
+				prompt: metadata.prompt,
+			};
+		}
+	}
+
+	return undefined;
+}
+
+function updateFuxWidget(ctx: ExtensionContext): void {
+	if (!ctx.hasUI) return;
+	const state = findFuxWidgetState(ctx);
+	if (!state) {
+		ctx.ui.setWidget(FUX_WIDGET_KEY, undefined);
+		return;
+	}
+	ctx.ui.setWidget(
+		FUX_WIDGET_KEY,
+		() => ({
+			invalidate() {},
+			render(width: number) {
+				return renderFuxWidgetLines(state, width);
+			},
+		}),
+		{ placement: "aboveEditor" },
+	);
 }
 
 function appendParentForkMetadata(pi: ExtensionAPI, metadata: FuxForkMetadata): void {
@@ -857,6 +991,7 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 		},
 	});
 	labelForkPoint(pi, ctx, leafId, forkedSessionFile, childPrompt);
+	updateFuxWidget(ctx);
 
 	const command = buildForkPaneCommand(forkedSessionFile);
 	const paneId = await runTmuxSplit(command, ctx.cwd);
@@ -951,6 +1086,14 @@ function splitSubcommand(args: string): { subcommand: string; rest: string } | u
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.on("session_start", (_event, ctx) => {
+		updateFuxWidget(ctx);
+	});
+
+	pi.on("message_end", (_event, ctx) => {
+		updateFuxWidget(ctx);
+	});
+
 	pi.registerTool({
 		name: "fux_fork",
 		label: "Fork Session",
@@ -1003,6 +1146,7 @@ export default function (pi: ExtensionAPI) {
 	const FUX_SUBCOMMANDS: AutocompleteItem[] = [
 		{ value: "prompt", label: "prompt", description: "Fork session with an initial prompt" },
 		{ value: "merge", label: "merge", description: "Merge child fork into parent session" },
+		{ value: "hide", label: "hide", description: "Hide the fux guidance widget" },
 		{ value: "help", label: "help", description: "Show usage information" },
 	];
 
@@ -1083,8 +1227,15 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
+				if (parsed.subcommand === "hide") {
+					pi.appendEntry(FUX_CUSTOM_TYPE, { kind: "widget_hidden", hiddenAt: new Date().toISOString() });
+					ctx.ui.setWidget(FUX_WIDGET_KEY, undefined);
+					notify(ctx, "Hidden fux guidance widget for this fork.", "info");
+					return;
+				}
+
 				if (parsed.subcommand === "help" || parsed.subcommand === "--help" || parsed.subcommand === "-h") {
-					notify(ctx, "Usage: /fux or /fux prompt [text] to fork, or /fux merge [--dry-run] [--yes] [--keep|--delete] [child-session-path] to merge a child session. Merge deletes the fork and closes the child pane by default; use --keep to preserve it.", "info");
+					notify(ctx, "Usage: /fux or /fux prompt [text] to fork; /fux merge [--dry-run] [--yes] [--keep|--delete] [child-session-path] to merge; /fux hide to hide guidance widget.", "info");
 					return;
 				}
 

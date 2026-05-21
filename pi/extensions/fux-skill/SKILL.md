@@ -29,13 +29,7 @@ Do **not** substitute another workflow such as `subagent`, background workers, t
 
 ## Asking to Fork
 
-You can suggest forking using the `ask_user` tool when it makes sense, for example:
-
-- The user presents 3 options and says "let's discuss option 1"
-- The user has a follow-up question on a related but separate topic
-- You want to explore a "what if" scenario before applying it
-
-If the user agrees, use `fux_fork`.
+You can suggest forking using the `ask_user` tool when it makes sense. If the user agrees, use `fux_fork`.
 
 ## Tools
 
@@ -50,7 +44,11 @@ Before forking, tell the user the merge workflow in plain language:
 
 > This creates a /fux fork. To merge back, preview first, then execute the merge. After the merge, restart the parent using the command printed by fux.
 
-The extension writes role-specific visible reminders into both sessions: the parent says it is the parent, and the fork says it is the child and names the parent as its merge target.
+The extension writes role-specific visible reminders into both sessions and shows an above-editor fux widget:
+
+- parent widget: says this pane is the parent and shows the restart command
+- child widget: says this pane is the child fork and names the parent as the merge target
+- `/fux hide` hides the widget for the current fork generation
 
 ## Merge Triggers
 
@@ -76,6 +74,7 @@ The user must restart the parent pi session with the exact command printed by fu
 /fux merge [--dry-run]        Show what would be merged
 /fux merge --yes              Merge fork back into parent (deletes fork)
 /fux merge --yes --keep       Merge but keep the fork
+/fux hide                     Hide the fux guidance widget
 ```
 
 ## /tree vs /fux
