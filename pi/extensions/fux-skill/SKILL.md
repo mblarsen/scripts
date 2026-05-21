@@ -1,22 +1,29 @@
 ---
 name: fux
-description: Fork the current session to explore a topic in isolation. Use only when the user requests it or explicitly agrees to fork.
+description: Fork the current session to explore a topic in isolation. Use when the user says fork, asks to fork, or explicitly agrees to fork. Prefer fux_fork/fux_merge over subagents for fork requests.
 ---
 
 # Fux
 
 Fork the session to explore a topic without derailing the main conversation.
 
+## Prefer Fux for Fork Requests
+
+When the user uses the word **fork** or asks to "create/start/open a fork", prefer this skill and the `fux_fork` / `fux_merge` tools.
+
+Do **not** substitute another workflow such as `subagent`, background workers, task boards, or generic tmux panes unless the user specifically asks for those. A fux fork is a Pi session fork with merge support; a subagent is not equivalent.
+
 ## When to Use
 
 - User explicitly asks to fork or explore something separately
+- User says "let's create a fork", "start a fork", "fork this", or similar
 - User says "let's talk about X first" when multiple topics are pending
 - User has follow-up questions on a tangential topic
 - User wants to try an approach before committing to it in the main session
 
 ## When NOT to Use
 
-- **As the default** for every decision or branching question
+- As the default for every decision or branching question
 - To dodge temporary uncertainty — it's better to make a reasonable choice and use `/tree` to revisit if needed
 - When the user hasn't asked to fork or explicitly agreed
 
@@ -28,11 +35,7 @@ You can suggest forking using the `ask_user` tool when it makes sense, for examp
 - The user has a follow-up question on a related but separate topic
 - You want to explore a "what if" scenario before applying it
 
-Example prompts:
-- "Want to fork off and explore this in more detail?"
-- "Should we split off to discuss this separately?"
-
-Use `fux_fork` when the user agrees.
+If the user agrees, use `fux_fork`.
 
 ## Tools
 
@@ -64,9 +67,7 @@ If the user says something like this, call `fux_merge` with `action: "preview"`,
 
 After `fux_merge` with `action: "execute"`, the parent session file was edited externally.
 
-**The user must restart the parent pi session with the exact command printed by fux.**
-
-Do not continue as if the parent automatically reloaded.
+The user must restart the parent pi session with the exact command printed by fux. Do not continue as if the parent automatically reloaded.
 
 ## CLI Usage
 
