@@ -208,6 +208,17 @@ function buildPiCommand(sessionFile: string): string {
 	return [shellQuote(argv0), ...args.map(shellQuote)].join(" ");
 }
 
+function buildForkPaneCommand(sessionFile: string): string {
+	const piCommand = buildPiCommand(sessionFile);
+	const script = [
+		piCommand,
+		"status=$?",
+		"printf '\\n[fux] pi exited with status %s. Pane kept open; exit this shell to close it.\\n' \"$status\"",
+		"exec \"${SHELL:-/bin/sh}\" -l",
+	].join("\n");
+	return `sh -lc ${shellQuote(script)}`;
+}
+
 async function runTmux(args: string[], description: string): Promise<string> {
 	return new Promise<string>((resolvePromise, reject) => {
 		const child = spawn("tmux", args, {
@@ -866,7 +877,7 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 	});
 	labelForkPoint(pi, ctx, leafId, forkedSessionFile, childPrompt);
 
-	const command = buildPiCommand(forkedSessionFile);
+	const command = buildForkPaneCommand(forkedSessionFile);
 	const paneId = await runTmuxSplit(command, ctx.cwd);
 	if (childPrompt) {
 		await sendPromptToPane(paneId, childPrompt);
