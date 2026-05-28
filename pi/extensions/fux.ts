@@ -310,7 +310,8 @@ function childForkGuidanceMessage(parentSessionFile: string): string {
 	return [
 		"This pane is a fux child fork.",
 		"Merge target: the parent session that created this fork.",
-		"When ready, preview with fux_merge action=preview, then execute with fux_merge action=execute.",
+		"When ready, run /fux merge --dry-run to preview, then /fux merge to confirm and merge.",
+		"Only the user should run merge or delete slash commands; they are not available as LLM tools.",
 		"After merging, restart the parent using:",
 		parentRestartCommand(parentSessionFile),
 	].join("\n");
@@ -1086,10 +1087,11 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 		createdAt: new Date().toISOString(),
 		mergeReminder: [
 			"This is a /fux fork. When merging back:",
-			"  1. Run /fux merge --dry-run to preview",
-			"  2. Run /fux merge --yes to merge into parent",
+			"  1. The user runs /fux merge --dry-run to preview",
+			"  2. The user runs /fux merge to confirm and merge into parent",
 			"  3. Restart the parent pi session (pi --resume <parent-path>)",
-			"  4. The fork session is deleted and this pane closes",
+			"  4. By default the fork session is deleted and this pane closes",
+			"Merge and delete are slash-command-only operations, not LLM-callable tools.",
 		].join("\n"),
 		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
@@ -1243,57 +1245,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
-		name: "fux_merge",
-		label: "Merge Fork",
-		description: "Merge this /fux fork back into the parent session. Preview shows what would be merged; execute performs the merge and deletes this fork (use --keep to preserve it).",
-		promptSnippet: "Merge fork into parent session",
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("preview"), Type.Literal("execute")], { description: "'preview' to show summary, 'execute' to merge and delete this fork" }),
-			childSessionPath: Type.Optional(Type.String({ description: "Path to child session (defaults to current session)" })),
-			keep: Type.Optional(Type.Boolean({ description: "If true, keep the fork session after merging (default: false, fork is deleted)" })),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			try {
-				let args = params.action === "preview" ? "--dry-run " : "--yes ";
-				if (params.keep) args += "--keep ";
-				if (params.childSessionPath) args += params.childSessionPath;
-				const message = await doMergeFux(args.trim(), ctx);
-				return {
-					content: [{ type: "text", text: message }],
-					details: { message },
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				throw new Error(`fux_merge failed: ${message}`);
-			}
-		},
-	});
-
-	pi.registerTool({
-		name: "fux_delete",
-		label: "Delete Fork",
-		description: "Delete this /fux child fork and close its tmux pane without merging. Only use when the user explicitly asks to delete/discard the fork.",
-		promptSnippet: "Delete current fork session",
-		parameters: Type.Object({
-			yes: Type.Optional(Type.Boolean({ description: "Must be true to confirm deleting this fork and closing this pane" })),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			try {
-				if (!params.yes) {
-					throw new Error("Deleting a fork is destructive. Re-run fux_delete with yes=true only after explicit user confirmation.");
-				}
-				const message = await doDeleteFux("--yes", ctx);
-				return {
-					content: [{ type: "text", text: message }],
-					details: { message },
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				throw new Error(`fux_delete failed: ${message}`);
-			}
-		},
-	});
+	// Merge and delete intentionally remain slash-command-only.
+	// They can modify session files and close tmux panes, so exposing them as
+	// LLM-callable tools lets an agent perform destructive session operations
+	// without the user seeing and initiating the slash command first.
 
 	const FUX_SUBCOMMANDS: AutocompleteItem[] = [
 		{ value: "prompt", label: "prompt", description: "Fork session with an initial prompt" },
