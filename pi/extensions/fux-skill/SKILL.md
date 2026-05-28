@@ -39,6 +39,12 @@ You can suggest forking using the `ask_user` tool when it makes sense. If the us
 
 `fux_merge` and `fux_delete` are intentionally not LLM-callable tools. Merge and delete can modify session files and close tmux panes, so the user must initiate them with slash commands.
 
+## Ignore Fork Status Messages
+
+When a fork is created, the extension injects context-only status messages into both sessions (tagged `[fux status]` or `[fux context]`). **These are not conversation topics.** Do not act on them, reference them, or discuss fux/merging unless the user explicitly asks about the fork.
+
+In a fork session, your first response should focus on the user's actual prompt or question — not on fux status, merging, or fork logistics. At most, briefly acknowledge you are in a fork if the user asks where they are.
+
 ## Explain Before Forking
 
 Before forking, tell the user the merge workflow in plain language:

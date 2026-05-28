@@ -299,20 +299,19 @@ function parentRestartCommand(parentSessionFile: string): string {
 
 function parentForkGuidanceMessage(parentSessionFile: string): string {
 	return [
-		"A fux child fork has been started in another pane.",
-		"This pane is the parent. The other pane is the child fork.",
-		"When the child merges back, restart this parent using:",
+		"[fux status] A child fork has been started in another pane for side exploration.",
+		"[fux status] This message is context only; continue your work normally.",
+		"[fux status] When the child merges back, restart this parent with:",
 		parentRestartCommand(parentSessionFile),
 	].join("\n");
 }
 
 function childForkGuidanceMessage(parentSessionFile: string): string {
 	return [
-		"This pane is a fux child fork.",
-		"Merge target: the parent session that created this fork.",
-		"When ready, run /fux merge --dry-run to preview, then /fux merge to confirm and merge.",
-		"Only the user should run merge or delete slash commands; they are not available as LLM tools.",
-		"After merging, restart the parent using:",
+		"[fux status] This session is a fux fork — a side branch for focused exploration.",
+		"[fux status] This message is context only; do not act on it or discuss fux/merging unless the user explicitly asks.",
+		"[fux status] If the user later wants to merge back, they can run /fux merge --dry-run to preview, then /fux merge to confirm.",
+		"[fux status] After merge, restart the parent with:",
 		parentRestartCommand(parentSessionFile),
 	].join("\n");
 }
@@ -1086,12 +1085,14 @@ async function doFux(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt?: st
 		forkedFromEntryId: leafId,
 		createdAt: new Date().toISOString(),
 		mergeReminder: [
-			"This is a /fux fork. When merging back:",
+			"[fux context] This session is a fux fork for focused exploration.",
+			"[fux context] This is status info only — do not discuss fux/merging unless the user asks.",
+			"[fux context] To merge back later:",
 			"  1. The user runs /fux merge --dry-run to preview",
 			"  2. The user runs /fux merge to confirm and merge into parent",
 			"  3. Restart the parent pi session (pi --resume <parent-path>)",
 			"  4. By default the fork session is deleted and this pane closes",
-			"Merge and delete are slash-command-only operations, not LLM-callable tools.",
+			"[fux context] Merge and delete are slash-command-only; they are not LLM tools.",
 		].join("\n"),
 		...(childPrompt ? { prompt: childPrompt } : {}),
 	};
