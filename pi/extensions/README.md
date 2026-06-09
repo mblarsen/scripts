@@ -14,7 +14,8 @@ Add the extensions to your pi settings (`~/.pi/agent/settings.json`) under `pack
       "extensions": [
         "pi/extensions/continue-from.ts",
         "pi/extensions/fux.ts",
-        "pi/extensions/footer-manager.ts"
+        "pi/extensions/footer-manager.ts",
+        "pi/extensions/update-changelog.ts"
       ]
     }
   ]
@@ -101,3 +102,33 @@ Manage the pi status footer — toggle built-in items, reorder extension statuse
 
 **Interactive controls** (inside the manager overlay):
 - **↑↓** select item · **Space/Enter** toggle visibility · **u/d** reorder extension items · **r** reset · **Esc** close
+
+---
+
+### update-changelog
+
+I created this extension to serve as a lightweight alternative to `pi-extmgr`, and to better understand changes and release notes in extension updates before upgrading.
+
+It detects available package updates asynchronously on startup, views change summaries across three specialized views, and installs updates directly from an interactive TUI overlay.
+
+**Detail Views:**
+- **commits**: Displays chronological commit history (both new updates and historical commits downward) with color-coded conventional commit parsing (breaking changes in bold red, features in green, fixes in cyan) and optional dates.
+- **releases**: Displays markdown-rendered GitHub Releases / release notes, automatically locating your currently installed version with an inline tag (`  <-- INSTALLED VERSION`).
+- **changelog**: Lazily checks and pulls the raw repository `CHANGELOG.md` file from the remote source as a fallback or comprehensive reference.
+
+**Use cases:**
+- Review commit history, release notes, or full markdown changelogs before upgrading packages.
+- Highlight breaking changes, features, and fixes in dedicated visual themes.
+- Run inline package installations directly inside the interactive list.
+
+**Commands:**
+| Command | Description |
+|---|---|
+| `/update-changelog` | Open the interactive package update changelog viewer |
+
+**Interactive controls** (inside the viewer):
+- **↑↓** or **j/k** select package · **Enter** view details · **u** install update · **v** toggle [v]iew (commits/releases/changelog) · **d** toggle [d]ates (in commits view) · **Esc** close
+- In details view: **gg** jump to top · **G** jump to bottom · **ctrl+u** scroll half-page up · **ctrl+d** scroll half-page down
+
+> [!TIP]
+> Since this extension detects and manages your package updates asynchronously, you can set `export PI_OFFLINE=1` in your shell environment. This disables Pi's built-in startup package update check entirely, letting `/update-changelog` handle all your update needs cleanly!
